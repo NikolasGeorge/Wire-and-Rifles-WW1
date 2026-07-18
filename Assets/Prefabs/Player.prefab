@@ -43,6 +43,7 @@ GameObject:
   - component: {fileID: 407753334520176066}
   - component: {fileID: 7837701211069032079}
   - component: {fileID: 696899832386356200}
+  - component: {fileID: 696899832386356201}
   m_Layer: 0
   m_Name: RemoteBody
   m_TagString: Untagged
@@ -50,6 +51,20 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
+--- !u!54 &696899832386356201
+Rigidbody:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 696899832386356115}
+  serializedVersion: 4
+  m_Mass: 1
+  m_UseGravity: 0
+  m_IsKinematic: 1
+  m_Interpolate: 0
+  m_Constraints: 0
+  m_CollisionDetection: 0
 --- !u!136 &696899832386356200
 CapsuleCollider:
   m_ObjectHideFlags: 0
@@ -176,6 +191,18 @@ Transform:
   m_Children: []
   m_Father: {fileID: 3738123646409376959}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &3229520745196109100
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8587688063911895558}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c8e42b3dae5f5019b2d3e4f5a6b7c8d9, type: 3}
+  m_Name:
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerNetworkHealth
 --- !u!1 &8587688063911895558
 GameObject:
   m_ObjectHideFlags: 0
@@ -193,6 +220,7 @@ GameObject:
   - component: {fileID: 516998439431662441}
   - component: {fileID: 4409268677856544909}
   - component: {fileID: 3229520745196109009}
+  - component: {fileID: 3229520745196109100}
   m_Layer: 0
   m_Name: Player
   m_TagString: Player
@@ -292,7 +320,7 @@ MonoBehaviour:
   audioSource: {fileID: 0}
   hitMarkerUI: {fileID: 0}
   shooterTeam: {fileID: 0}
-  allowFriendlyFire: 1
+  allowFriendlyFire: 0
   showFriendlyFireDebugLogs: 1
   weaponHolder: {fileID: 8827744084244500161}
   forceSprintPoseForTesting: 0

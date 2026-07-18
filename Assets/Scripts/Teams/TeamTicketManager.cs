@@ -1,7 +1,9 @@
 using System;
+using FishNet.Object;
+using FishNet.Object.Synchronizing;
 using UnityEngine;
 
-public class TeamTicketManager : MonoBehaviour
+public class TeamTicketManager : NetworkBehaviour
 {
     public static TeamTicketManager Instance { get; private set; }
 
@@ -20,7 +22,16 @@ public class TeamTicketManager : MonoBehaviour
     [Header("Debug")]
     public bool showDebugLogs = true;
 
+    // Server-written replicated ticket counts. The public fields above remain
+    // what UI reads; connected clients copy the synced values into them.
+    private readonly SyncVar<int> syncAlliedTickets = new SyncVar<int>();
+    private readonly SyncVar<int> syncCentralTickets = new SyncVar<int>();
+
     private float bleedTimer;
+
+    // True on a connected client that is not the server. Offline single-player
+    // keeps the original fully-local behavior.
+    private bool IsRemoteClientOnly => IsClientInitialized && !IsServerInitialized;
 
     private void Awake()
     {
@@ -40,11 +51,49 @@ public class TeamTicketManager : MonoBehaviour
             objectives = FindObjectsByType<ObjectiveCaptureZone>(FindObjectsSortMode.None);
         }
 
+        syncAlliedTickets.OnChange += OnAlliedTicketsSynced;
+        syncCentralTickets.OnChange += OnCentralTicketsSynced;
+
+        OnTicketsChanged?.Invoke();
+    }
+
+    public override void OnStartServer()
+    {
+        base.OnStartServer();
+
+        syncAlliedTickets.Value = alliedPowersTickets;
+        syncCentralTickets.Value = centralPowersTickets;
+    }
+
+    private void OnAlliedTicketsSynced(int previous, int next, bool asServer)
+    {
+        if (asServer)
+        {
+            return;
+        }
+
+        alliedPowersTickets = next;
+        OnTicketsChanged?.Invoke();
+    }
+
+    private void OnCentralTicketsSynced(int previous, int next, bool asServer)
+    {
+        if (asServer)
+        {
+            return;
+        }
+
+        centralPowersTickets = next;
         OnTicketsChanged?.Invoke();
     }
 
     private void Update()
     {
+        if (IsRemoteClientOnly)
+        {
+            return;
+        }
+
         if (!enableObjectiveTicketBleed)
         {
             return;
@@ -73,6 +122,11 @@ public class TeamTicketManager : MonoBehaviour
 
     public void ConsumeTickets(Team team, int amount, string reason)
     {
+        if (IsRemoteClientOnly)
+        {
+            return;
+        }
+
         if (amount <= 0 || team == Team.Neutral)
         {
             return;
@@ -85,6 +139,12 @@ public class TeamTicketManager : MonoBehaviour
         else if (team == Team.CentralPowers)
         {
             centralPowersTickets = Mathf.Max(0, centralPowersTickets - amount);
+        }
+
+        if (IsServerInitialized)
+        {
+            syncAlliedTickets.Value = alliedPowersTickets;
+            syncCentralTickets.Value = centralPowersTickets;
         }
 
         if (showDebugLogs)
