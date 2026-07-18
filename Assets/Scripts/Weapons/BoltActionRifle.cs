@@ -954,16 +954,30 @@ public class BoltActionRifle : NetworkBehaviour
         float finalDamage = weaponData.damage * damageMultiplier;
         bool killedTarget = false;
 
-        HealthComponent health = targetObject.GetComponentInChildren<HealthComponent>(true);
+        PlayerNetworkHealth playerHealth = targetObject.GetComponent<PlayerNetworkHealth>();
 
-        if (health != null)
+        if (playerHealth != null)
         {
-            if (health.IsDead)
+            if (playerHealth.IsDead)
             {
                 yield break;
             }
 
-            killedTarget = health.TakeDamage(finalDamage);
+            killedTarget = playerHealth.ServerTakeDamage(finalDamage);
+        }
+        else
+        {
+            HealthComponent health = targetObject.GetComponentInChildren<HealthComponent>(true);
+
+            if (health != null)
+            {
+                if (health.IsDead)
+                {
+                    yield break;
+                }
+
+                killedTarget = health.TakeDamage(finalDamage);
+            }
         }
 
         if (shooter != null && shooter.IsActive)

@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using FishNet.Object;
+using FishNet.Object.Synchronizing;
 using UnityEngine;
 
 [RequireComponent(typeof(Collider))]
-public class ObjectiveCaptureZone : MonoBehaviour
+public class ObjectiveCaptureZone : NetworkBehaviour
 {
     public static event Action<ObjectiveCaptureZone, ObjectiveEventType, Team> OnObjectiveEvent;
 
@@ -33,6 +35,16 @@ public class ObjectiveCaptureZone : MonoBehaviour
 
     private bool wasContested;
 
+    // Server-written replicated capture state. The public fields above remain
+    // what UI reads; connected clients copy the synced values into them.
+    private readonly SyncVar<float> syncControlPercent = new SyncVar<float>();
+    private readonly SyncVar<Team> syncControllingTeam = new SyncVar<Team>();
+    private readonly SyncVar<bool> syncIsContested = new SyncVar<bool>();
+
+    // True on a connected client that is not the server. Offline single-player
+    // keeps the original fully-local simulation.
+    private bool IsRemoteClientOnly => IsClientInitialized && !IsServerInitialized;
+
     public float ControlPercent => controlPercent;
     public float ControlProgress01 => Mathf.Clamp01(Mathf.Abs(controlPercent) / 100f);
     public bool IsContested { get; private set; }
@@ -55,6 +67,26 @@ public class ObjectiveCaptureZone : MonoBehaviour
     }
 
     private void Update()
+    {
+        if (IsRemoteClientOnly)
+        {
+            controlPercent = syncControlPercent.Value;
+            controllingTeam = syncControllingTeam.Value;
+            IsContested = syncIsContested.Value;
+            return;
+        }
+
+        SimulateCapture();
+
+        if (IsServerInitialized)
+        {
+            syncControlPercent.Value = controlPercent;
+            syncControllingTeam.Value = controllingTeam;
+            syncIsContested.Value = IsContested;
+        }
+    }
+
+    private void SimulateCapture()
     {
         CleanupMissingPlayers();
         CountTeams();
@@ -81,6 +113,11 @@ public class ObjectiveCaptureZone : MonoBehaviour
 
     private void OnTriggerEnter(Collider other)
     {
+        if (IsRemoteClientOnly)
+        {
+            return;
+        }
+
         PlayerTeam playerTeam = other.GetComponentInParent<PlayerTeam>();
 
         if (playerTeam == null || playerTeam.team == Team.Neutral)
@@ -98,6 +135,11 @@ public class ObjectiveCaptureZone : MonoBehaviour
 
     private void OnTriggerExit(Collider other)
     {
+        if (IsRemoteClientOnly)
+        {
+            return;
+        }
+
         PlayerTeam playerTeam = other.GetComponentInParent<PlayerTeam>();
 
         if (playerTeam == null)
@@ -293,6 +335,19 @@ public class ObjectiveCaptureZone : MonoBehaviour
     }
 
     private void RaiseObjectiveEvent(ObjectiveEventType eventType, Team relatedTeam)
+    {
+        if (IsServerInitialized)
+        {
+            // All clients (including the host's client) receive it via the RPC.
+            ObserversRaiseObjectiveEvent(eventType, relatedTeam);
+            return;
+        }
+
+        OnObjectiveEvent?.Invoke(this, eventType, relatedTeam);
+    }
+
+    [ObserversRpc]
+    private void ObserversRaiseObjectiveEvent(ObjectiveEventType eventType, Team relatedTeam)
     {
         OnObjectiveEvent?.Invoke(this, eventType, relatedTeam);
     }

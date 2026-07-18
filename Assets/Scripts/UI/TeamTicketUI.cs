@@ -18,7 +18,7 @@ public class TeamTicketUI : MonoBehaviour
     {
         if (ticketManager == null)
         {
-            ticketManager = FindAnyObjectByType<TeamTicketManager>();
+            ticketManager = FindAnyObjectByType<TeamTicketManager>(FindObjectsInactive.Include);
         }
 
         if (localPlayerTeam == null)
@@ -47,7 +47,15 @@ public class TeamTicketUI : MonoBehaviour
     {
         if (ticketManager == null)
         {
-            return;
+            // On clients the networked TicketManager starts deactivated until
+            // the server spawns it, which is after Awake ran. Keep retrying,
+            // including while it is still inactive.
+            ticketManager = FindAnyObjectByType<TeamTicketManager>(FindObjectsInactive.Include);
+
+            if (ticketManager == null)
+            {
+                return;
+            }
         }
 
         if (alliedPowersTicketText != null)

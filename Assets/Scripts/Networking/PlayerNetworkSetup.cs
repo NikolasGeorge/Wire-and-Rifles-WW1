@@ -1,8 +1,20 @@
 using FishNet.Object;
+using FishNet.Object.Synchronizing;
 using UnityEngine;
 
 public class PlayerNetworkSetup : NetworkBehaviour
 {
+    [Header("Team Assignment")]
+    public Color alliedBodyColor = new Color(0.25f, 0.4f, 0.85f);
+    public Color centralBodyColor = new Color(0.8f, 0.25f, 0.2f);
+
+    // Server-assigned team, alternated per spawned player.
+    private readonly SyncVar<Team> syncTeam = new SyncVar<Team>();
+
+    private static int serverTeamAssignCounter;
+
+    public Team AssignedTeam => syncTeam.Value;
+
     [Header("Owner Only")]
     [Tooltip("First-person camera root. Also holds the AudioListener and weapon view-model. Disabled on non-owned players.")]
     public GameObject cameraRoot;
@@ -14,12 +26,27 @@ public class PlayerNetworkSetup : NetworkBehaviour
     [Tooltip("Visible body other players see. Hidden on the owned player so it never blocks the first-person view.")]
     public GameObject remoteBody;
 
+    public override void OnStartServer()
+    {
+        base.OnStartServer();
+
+        Team team = serverTeamAssignCounter % 2 == 0 ? Team.AlliedPowers : Team.CentralPowers;
+        serverTeamAssignCounter++;
+
+        syncTeam.Value = team;
+        ApplyTeam(team);
+    }
+
     public override void OnStartClient()
     {
         base.OnStartClient();
 
+        ApplyTeam(syncTeam.Value);
+
         if (IsOwner)
         {
+            MoveOwnerToTeamSpawn();
+
             if (remoteBody != null)
             {
                 remoteBody.SetActive(false);
@@ -40,6 +67,65 @@ public class PlayerNetworkSetup : NetworkBehaviour
             {
                 behaviour.enabled = false;
             }
+        }
+    }
+
+    private void ApplyTeam(Team team)
+    {
+        PlayerTeam localTeam = GetComponent<PlayerTeam>();
+
+        if (localTeam != null)
+        {
+            localTeam.team = team;
+        }
+
+        if (remoteBody != null)
+        {
+            Renderer bodyRenderer = remoteBody.GetComponentInChildren<Renderer>(true);
+
+            if (bodyRenderer != null)
+            {
+                bodyRenderer.material.color = team == Team.AlliedPowers ? alliedBodyColor : centralBodyColor;
+            }
+        }
+    }
+
+    public void MoveOwnerToTeamSpawn()
+    {
+        if (!IsOwner)
+        {
+            return;
+        }
+
+        PlayerTeam localTeam = GetComponent<PlayerTeam>();
+
+        if (localTeam == null)
+        {
+            return;
+        }
+
+        Transform spawnPoint = TeamSpawnArea.GetSpawnPoint(localTeam.team);
+
+        if (spawnPoint == null)
+        {
+            return;
+        }
+
+        // The CharacterController caches its position; it must be disabled
+        // for a teleport to stick.
+        CharacterController controller = GetComponent<CharacterController>();
+
+        if (controller != null)
+        {
+            controller.enabled = false;
+        }
+
+        transform.position = spawnPoint.position;
+        transform.rotation = Quaternion.Euler(0f, spawnPoint.eulerAngles.y, 0f);
+
+        if (controller != null)
+        {
+            controller.enabled = true;
         }
     }
 
