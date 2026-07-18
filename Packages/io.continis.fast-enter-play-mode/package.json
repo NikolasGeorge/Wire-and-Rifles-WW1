@@ -1,0 +1,23 @@
+{
+  "name": "io.continis.fast-enter-play-mode",
+  "version": "1.0.0",
+  "displayName": "Fast Enter Play Mode Button",
+  "description": "A button for the main toolbar, to initiate Play Mode with no domain or scene reload.",
+  "keywords": [
+    "play mode",
+    "domain",
+    "reload",
+    "toolbar"
+  ],
+  "author": {
+    "name": "Ciro Continisio",
+    "url": "https://tools.continis.io/",
+    "email": "buoybase@gmail.com"
+  },
+  "unity": "6000.3",
+  "type": "tool",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://tools.continis.io/fast-enter-play-mode/",
+  "changelogUrl": "https://tools.continis.io/fast-enter-play-mode/changelog",
+  "_fingerprint": "bdad6ab8b0fd8aa7dd6603650f7d3295de269548"
+}

@@ -1,0 +1,43 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4792dcb494983534e8da14289e7d8f4a, type: 3}
+  m_Name: BoltActionRifleData
+  m_EditorClassIdentifier: Assembly-CSharp::WeaponData
+  weaponName: Bolt-Action Rifle
+  damage: 100
+  range: 1000
+  useBulletTravelTime: 1
+  muzzleVelocity: 150
+  minimumBulletTravelTime: 0
+  baseInaccuracyAngle: 1.5
+  movingInaccuracyPenalty: 4
+  airborneInaccuracyPenalty: 15
+  aimingInaccuracyMultiplier: 0.15
+  aimAccuracyBuildTime: 0.25
+  aimMoveSpeedMultiplier: 0.5
+  useRapidFireAccuracyPenalty: 1
+  rapidFireResetTime: 1
+  rapidFireSecondShotPenalty: 1
+  rapidFirePenaltyStep: 0.5
+  rapidFireMinimumPenalty: 0.25
+  sprintFireLockoutTime: 0.25
+  clipSize: 5
+  startingReserveAmmo: 300
+  boltCycleTime: 1.25
+  reloadTime: 2
+  fireSound: {fileID: 8300000, guid: ec74244db866d154dba2cfb885da464c, type: 3}
+  fireSoundVolume: 0.05
+  reloadSound: {fileID: 8300000, guid: 8f8bd7a3309c24349a1de01679ae0454, type: 3}
+  reloadSoundVolume: 0.05
+  boltCycleSound: {fileID: 8300000, guid: d9f6ee266a2dcd54c8f3664d0126381e, type: 3}
+  boltCycleSoundVolume: 0.05
+  boltCycleSoundDelay: 0.25
