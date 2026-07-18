@@ -1,8 +1,10 @@
 using System.Collections;
+using FishNet.Connection;
+using FishNet.Object;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
-public class BoltActionRifle : MonoBehaviour
+public class BoltActionRifle : NetworkBehaviour
 {
     public Camera playerCamera;
     public PlayerController playerController;
@@ -60,6 +62,18 @@ public class BoltActionRifle : MonoBehaviour
     private int rapidFireChainShotIndex;
     private float lastShotTime = -999f;
     private float rapidFireCurrentPenaltyPercent;
+
+    // Server-authoritative mirror of ammo and fire timing, used to validate
+    // client shot reports. Client-side fields above stay for responsiveness.
+    private int serverCurrentAmmo;
+    private int serverReserveAmmo;
+    private bool serverIsReloading;
+    private float serverLastShotTime = -999f;
+
+    private const float ServerFireCooldownLeniency = 0.9f;
+    private const float ServerShotOriginTolerance = 4f;
+    private const float ServerRangeTolerance = 1.1f;
+    private const float ApproximateEyeHeight = 1.6f;
 
     public int CurrentAmmo => currentAmmo;
     public int ReserveAmmo => reserveAmmo;
@@ -213,8 +227,24 @@ public class BoltActionRifle : MonoBehaviour
         }
     }
 
+    public override void OnStartServer()
+    {
+        base.OnStartServer();
+
+        if (weaponData != null)
+        {
+            serverCurrentAmmo = weaponData.clipSize;
+            serverReserveAmmo = weaponData.startingReserveAmmo;
+        }
+    }
+
     private void Update()
     {
+        if (!IsOwner)
+        {
+            return;
+        }
+
         UpdateRapidFirePenaltyReset();
         UpdateAiming();
         UpdateWeaponSprintPose();
@@ -420,7 +450,31 @@ public class BoltActionRifle : MonoBehaviour
             weaponRecoil.ApplyRecoil(recoilMultiplier);
         }
 
-        StartCoroutine(ResolveShotAfterTravel(ray));
+        bool didHit = Physics.Raycast(ray, out RaycastHit hit, weaponData.range, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+
+        Vector3 shotStartPoint = muzzlePoint != null ? muzzlePoint.position : ray.origin;
+        Vector3 shotEndPoint = didHit ? hit.point : ray.origin + ray.direction * weaponData.range;
+        Vector3 hitNormal = didHit ? hit.normal : Vector3.zero;
+
+        NetworkObject targetObject = null;
+        float damageMultiplier = 1f;
+        bool isHeadshot = false;
+
+        if (didHit)
+        {
+            GetHitboxInfo(hit.collider, out damageMultiplier, out isHeadshot);
+
+            targetObject = hit.collider.GetComponentInParent<NetworkObject>();
+
+            if (targetObject == NetworkObject)
+            {
+                targetObject = null;
+            }
+        }
+
+        ServerReportFire(shotStartPoint, shotEndPoint, didHit, hitNormal, targetObject, damageMultiplier, isHeadshot);
+
+        StartCoroutine(ResolveShotAfterTravel(ray, didHit, hit, shotStartPoint, shotEndPoint, targetObject));
     }
 
     private void UpdateRapidFirePenaltyForShot()
@@ -455,21 +509,9 @@ public class BoltActionRifle : MonoBehaviour
         lastShotTime = Time.time;
     }
 
-    private IEnumerator ResolveShotAfterTravel(Ray ray)
+    private IEnumerator ResolveShotAfterTravel(Ray ray, bool didHit, RaycastHit hit, Vector3 shotStartPoint, Vector3 shotEndPoint, NetworkObject targetObject)
     {
-        Vector3 shotStartPoint = muzzlePoint != null ? muzzlePoint.position : ray.origin;
-        Vector3 shotEndPoint = ray.origin + ray.direction * weaponData.range;
-
-        bool didHit = Physics.Raycast(ray, out RaycastHit hit, weaponData.range, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
-
-        float travelDistance = weaponData.range;
-
-        if (didHit)
-        {
-            shotEndPoint = hit.point;
-            travelDistance = Vector3.Distance(shotStartPoint, hit.point);
-        }
-
+        float travelDistance = didHit ? Vector3.Distance(shotStartPoint, shotEndPoint) : weaponData.range;
         float travelTime = GetBulletTravelTime(travelDistance);
 
         if (showShotLineInGame && muzzlePoint != null)
@@ -497,6 +539,13 @@ public class BoltActionRifle : MonoBehaviour
 
         Debug.Log("Hit: " + hit.collider.name);
 
+        if (targetObject != null)
+        {
+            // Networked target: the server applies damage and sends the hit
+            // marker back via TargetRpc.
+            yield break;
+        }
+
         HealthComponent health = hit.collider.GetComponentInParent<HealthComponent>();
 
         if (health != null)
@@ -513,28 +562,7 @@ public class BoltActionRifle : MonoBehaviour
                 yield break;
             }
 
-            HitboxDamageZone damageZone = hit.collider.GetComponent<HitboxDamageZone>();
-
-            if (damageZone == null)
-            {
-                damageZone = hit.collider.GetComponentInParent<HitboxDamageZone>();
-            }
-
-            Debug.Log("Hit collider: " + hit.collider.name + " | Damage Zone: " + (damageZone != null ? damageZone.zoneName : "None"));
-
-            bool isHeadshot = false;
-            float damageMultiplier = 1f;
-
-            if (damageZone != null)
-            {
-                isHeadshot = damageZone.countsAsHeadshot;
-                damageMultiplier = damageZone.damageMultiplier;
-            }
-            else
-            {
-                isHeadshot = IsHeadshot(hit.collider);
-                damageMultiplier = isHeadshot ? headshotDamageMultiplier : 1f;
-            }
+            GetHitboxInfo(hit.collider, out float damageMultiplier, out bool isHeadshot);
 
             float finalDamage = weaponData.damage * damageMultiplier;
             bool killedTarget = health.TakeDamage(finalDamage);
@@ -601,6 +629,10 @@ public class BoltActionRifle : MonoBehaviour
     {
         GameObject lineObject = new GameObject("BulletTravelLine");
         LineRenderer lineRenderer = lineObject.AddComponent<LineRenderer>();
+
+        // Scheduled with the engine so the line can never outlive its timer,
+        // even if this coroutine is interrupted before reaching Destroy below.
+        Destroy(lineObject, Mathf.Max(0f, travelTime) + shotLineDuration + 0.1f);
 
         lineRenderer.positionCount = 2;
         lineRenderer.startWidth = shotLineWidth;
@@ -727,13 +759,18 @@ public class BoltActionRifle : MonoBehaviour
 
     private void SpawnBulletImpact(RaycastHit hit)
     {
+        SpawnBulletImpactAtPoint(hit.point, hit.normal);
+    }
+
+    private void SpawnBulletImpactAtPoint(Vector3 point, Vector3 normal)
+    {
         if (bulletImpactPrefab == null)
         {
             return;
         }
 
-        Vector3 spawnPosition = hit.point + hit.normal * 0.01f;
-        Quaternion spawnRotation = Quaternion.LookRotation(hit.normal);
+        Vector3 spawnPosition = point + normal * 0.01f;
+        Quaternion spawnRotation = Quaternion.LookRotation(normal);
 
         GameObject impact = Instantiate(bulletImpactPrefab, spawnPosition, spawnRotation);
 
@@ -800,6 +837,7 @@ public class BoltActionRifle : MonoBehaviour
         }
 
         StartCoroutine(Reload());
+        ServerReportReload();
     }
 
     private IEnumerator Reload()
@@ -820,5 +858,214 @@ public class BoltActionRifle : MonoBehaviour
         isReloading = false;
 
         Debug.Log("Reloaded. Ammo: " + currentAmmo + "/" + reserveAmmo);
+    }
+
+    private void GetHitboxInfo(Collider hitCollider, out float damageMultiplier, out bool isHeadshot)
+    {
+        HitboxDamageZone damageZone = hitCollider.GetComponent<HitboxDamageZone>();
+
+        if (damageZone == null)
+        {
+            damageZone = hitCollider.GetComponentInParent<HitboxDamageZone>();
+        }
+
+        if (damageZone != null)
+        {
+            isHeadshot = damageZone.countsAsHeadshot;
+            damageMultiplier = damageZone.damageMultiplier;
+        }
+        else
+        {
+            isHeadshot = IsHeadshot(hitCollider);
+            damageMultiplier = isHeadshot ? headshotDamageMultiplier : 1f;
+        }
+    }
+
+    [ServerRpc]
+    private void ServerReportFire(Vector3 shotStartPoint, Vector3 shotEndPoint, bool didHit, Vector3 hitNormal, NetworkObject targetObject, float damageMultiplier, bool isHeadshot)
+    {
+        if (weaponData == null)
+        {
+            return;
+        }
+
+        if (serverIsReloading || serverCurrentAmmo <= 0)
+        {
+            Debug.Log("[Rifle Server] Shot rejected: reloading or out of ammo (" + serverCurrentAmmo + ").");
+            return;
+        }
+
+        if (Time.time - serverLastShotTime < weaponData.boltCycleTime * ServerFireCooldownLeniency)
+        {
+            Debug.Log("[Rifle Server] Shot rejected: fired faster than bolt cycle allows.");
+            return;
+        }
+
+        Vector3 approximateEyePosition = transform.position + Vector3.up * ApproximateEyeHeight;
+
+        if (Vector3.Distance(approximateEyePosition, shotStartPoint) > ServerShotOriginTolerance)
+        {
+            Debug.Log("[Rifle Server] Shot rejected: origin too far from player (" + Vector3.Distance(approximateEyePosition, shotStartPoint).ToString("F1") + "m).");
+            return;
+        }
+
+        if (didHit && Vector3.Distance(shotStartPoint, shotEndPoint) > weaponData.range * ServerRangeTolerance)
+        {
+            Debug.Log("[Rifle Server] Shot rejected: hit beyond weapon range.");
+            return;
+        }
+
+        serverCurrentAmmo--;
+        serverLastShotTime = Time.time;
+
+        ObserversPlayFireEffects(shotStartPoint, shotEndPoint, didHit, hitNormal);
+
+        if (!didHit || targetObject == null || targetObject == NetworkObject)
+        {
+            return;
+        }
+
+        float clampedMultiplier = Mathf.Clamp(damageMultiplier, 0f, headshotDamageMultiplier);
+
+        StartCoroutine(ServerApplyHitAfterTravel(Owner, targetObject, shotStartPoint, shotEndPoint, clampedMultiplier, isHeadshot));
+    }
+
+    private IEnumerator ServerApplyHitAfterTravel(NetworkConnection shooter, NetworkObject targetObject, Vector3 shotStartPoint, Vector3 shotEndPoint, float damageMultiplier, bool isHeadshot)
+    {
+        float travelTime = GetBulletTravelTime(Vector3.Distance(shotStartPoint, shotEndPoint));
+
+        if (travelTime > 0f)
+        {
+            yield return new WaitForSeconds(travelTime);
+        }
+
+        if (targetObject == null)
+        {
+            yield break;
+        }
+
+        PlayerTeam targetTeam = targetObject.GetComponentInChildren<PlayerTeam>(true);
+
+        if (IsFriendlyFireBlocked(targetTeam))
+        {
+            yield break;
+        }
+
+        float finalDamage = weaponData.damage * damageMultiplier;
+        bool killedTarget = false;
+
+        HealthComponent health = targetObject.GetComponentInChildren<HealthComponent>(true);
+
+        if (health != null)
+        {
+            if (health.IsDead)
+            {
+                yield break;
+            }
+
+            killedTarget = health.TakeDamage(finalDamage);
+        }
+
+        if (shooter != null && shooter.IsActive)
+        {
+            TargetHitConfirmed(shooter, finalDamage, killedTarget, isHeadshot);
+        }
+    }
+
+    [TargetRpc]
+    private void TargetHitConfirmed(NetworkConnection connection, float damage, bool killedTarget, bool isHeadshot)
+    {
+        if (hitMarkerUI != null)
+        {
+            hitMarkerUI.ShowHitMarker(damage, killedTarget, isHeadshot);
+        }
+    }
+
+    [ObserversRpc(ExcludeOwner = true)]
+    private void ObserversPlayFireEffects(Vector3 shotStartPoint, Vector3 shotEndPoint, bool didHit, Vector3 hitNormal)
+    {
+        if (weaponData == null)
+        {
+            return;
+        }
+
+        if (weaponData.fireSound != null)
+        {
+            AudioSource.PlayClipAtPoint(weaponData.fireSound, shotStartPoint, weaponData.fireSoundVolume);
+        }
+
+        StartCoroutine(RemoteBoltCycleSound());
+
+        float travelTime = GetBulletTravelTime(Vector3.Distance(shotStartPoint, shotEndPoint));
+
+        if (showShotLineInGame)
+        {
+            StartCoroutine(ShowTravelLine(shotStartPoint, shotEndPoint, travelTime));
+        }
+
+        if (didHit)
+        {
+            StartCoroutine(RemoteImpactAfterTravel(shotEndPoint, hitNormal, travelTime));
+        }
+    }
+
+    private IEnumerator RemoteImpactAfterTravel(Vector3 point, Vector3 normal, float travelTime)
+    {
+        if (travelTime > 0f)
+        {
+            yield return new WaitForSeconds(travelTime);
+        }
+
+        SpawnBulletImpactAtPoint(point, normal);
+    }
+
+    private IEnumerator RemoteBoltCycleSound()
+    {
+        if (weaponData.boltCycleSound == null)
+        {
+            yield break;
+        }
+
+        yield return new WaitForSeconds(Mathf.Max(0f, weaponData.boltCycleSoundDelay));
+
+        AudioSource.PlayClipAtPoint(weaponData.boltCycleSound, transform.position + Vector3.up * 1.5f, weaponData.boltCycleSoundVolume);
+    }
+
+    [ServerRpc]
+    private void ServerReportReload()
+    {
+        if (weaponData == null || serverIsReloading || serverCurrentAmmo >= weaponData.clipSize || serverReserveAmmo <= 0)
+        {
+            return;
+        }
+
+        StartCoroutine(ServerReload());
+        ObserversPlayReloadSound();
+    }
+
+    private IEnumerator ServerReload()
+    {
+        serverIsReloading = true;
+
+        yield return new WaitForSeconds(weaponData.reloadTime);
+
+        int ammoNeeded = weaponData.clipSize - serverCurrentAmmo;
+        int ammoToLoad = Mathf.Min(ammoNeeded, serverReserveAmmo);
+
+        serverCurrentAmmo += ammoToLoad;
+        serverReserveAmmo -= ammoToLoad;
+
+        serverIsReloading = false;
+    }
+
+    [ObserversRpc(ExcludeOwner = true)]
+    private void ObserversPlayReloadSound()
+    {
+        if (weaponData == null || weaponData.reloadSound == null)
+        {
+            return;
+        }
+
+        AudioSource.PlayClipAtPoint(weaponData.reloadSound, transform.position + Vector3.up * 1.5f, weaponData.reloadSoundVolume);
     }
 }
