@@ -4,6 +4,29 @@ using UnityEngine;
 
 public class ConnectionHud : MonoBehaviour
 {
+    // Explicitly stop connections when play mode tears down. If the editor
+    // destroys the NetworkManager while Tugboat is still serving, the socket
+    // thread can orphan and keep the port bound until the editor restarts.
+    private void OnDestroy()
+    {
+        NetworkManager networkManager = InstanceFinder.NetworkManager;
+
+        if (networkManager == null)
+        {
+            return;
+        }
+
+        if (networkManager.ClientManager.Started)
+        {
+            networkManager.ClientManager.StopConnection();
+        }
+
+        if (networkManager.ServerManager.Started)
+        {
+            networkManager.ServerManager.StopConnection(true);
+        }
+    }
+
     private void OnGUI()
     {
         NetworkManager networkManager = InstanceFinder.NetworkManager;
