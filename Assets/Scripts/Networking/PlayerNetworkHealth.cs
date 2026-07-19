@@ -1,3 +1,4 @@
+using FishNet.Connection;
 using FishNet.Object;
 using FishNet.Object.Synchronizing;
 using UnityEngine;
@@ -21,6 +22,11 @@ public class PlayerNetworkHealth : NetworkBehaviour
     public bool useDownedState = true;
     public float bleedOutTime = 30f;
     public float giveUpDelay = 5f;
+
+    [Header("Revive")]
+    public float reviveHealth = 50f;
+    [Tooltip("Server-side validation range for a revive request. Keep a little above the interactor's revive distance.")]
+    public float maxReviveDistance = 4.5f;
 
     [Header("Respawn")]
     public float respawnDelay = 3f;
@@ -51,6 +57,7 @@ public class PlayerNetworkHealth : NetworkBehaviour
     public bool IsDead => State == PlayerLifeState.Dead;
     public float CurrentHealth => syncHealth.Value;
     public float BleedOutRemaining => syncBleedOut.Value;
+    public float BleedOutProgress01 => bleedOutTime <= 0f ? 0f : Mathf.Clamp01(syncBleedOut.Value / bleedOutTime);
     public float DownedElapsed => IsDowned ? Mathf.Max(0f, bleedOutTime - syncBleedOut.Value) : 0f;
 
     private void Awake()
@@ -72,6 +79,45 @@ public class PlayerNetworkHealth : NetworkBehaviour
         }
 
         syncState.OnChange += OnStateChanged;
+
+        EnsureDownedMarker();
+    }
+
+    // The scene's practice dummies already carry a fully built DownedWorldMarker
+    // hierarchy. Clone one under this player at runtime and rebind it, so the
+    // prefab needs no hand-maintained marker copy.
+    private void EnsureDownedMarker()
+    {
+        if (GetComponentInChildren<DownedWorldMarker>(true) != null)
+        {
+            return;
+        }
+
+        DownedWorldMarker template = null;
+
+        foreach (DownedWorldMarker candidate in FindObjectsByType<DownedWorldMarker>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        {
+            if (candidate.GetComponentInParent<PlayerNetworkHealth>() == null)
+            {
+                template = candidate;
+                break;
+            }
+        }
+
+        if (template == null)
+        {
+            return;
+        }
+
+        DownedWorldMarker marker = Instantiate(template.gameObject, transform).GetComponent<DownedWorldMarker>();
+        marker.name = "DownedWorldMarker";
+        marker.health = null;
+        marker.playerHealth = this;
+        marker.targetTeam = playerTeam;
+        marker.localPlayerTeam = null;
+        marker.playerCamera = null;
+        marker.markerAnchor = null;
+        marker.anchorOffset = new Vector3(0f, 0.7f, 0f);
     }
 
     public override void OnStartServer()
@@ -193,6 +239,81 @@ public class PlayerNetworkHealth : NetworkBehaviour
         syncHealth.Value = maxHealth;
         syncBleedOut.Value = 0f;
         syncState.Value = PlayerLifeState.Alive;
+    }
+
+    // Client-side eligibility check used by ReviveInteractor before it shows
+    // the prompt. The server re-validates everything in ServerRequestRevive.
+    public bool CanBeRevivedBy(PlayerTeam reviverTeam)
+    {
+        if (!IsDowned || IsOwner)
+        {
+            return false;
+        }
+
+        if (reviverTeam == null || reviverTeam.team == Team.Neutral)
+        {
+            return false;
+        }
+
+        return playerTeam != null && playerTeam.team == reviverTeam.team;
+    }
+
+    // Called on the reviver's client after their hold-E completes. This runs
+    // on the DOWNED player's object, so ownership cannot be required.
+    public void RequestRevive()
+    {
+        ServerRequestRevive();
+    }
+
+    [ServerRpc(RequireOwnership = false)]
+    private void ServerRequestRevive(NetworkConnection sender = null)
+    {
+        if (syncState.Value != PlayerLifeState.Downed)
+        {
+            return;
+        }
+
+        if (sender == null || sender.FirstObject == null)
+        {
+            return;
+        }
+
+        NetworkObject reviverObject = sender.FirstObject;
+
+        PlayerTeam reviverTeam = reviverObject.GetComponent<PlayerTeam>();
+
+        if (reviverTeam == null || playerTeam == null || reviverTeam.team != playerTeam.team)
+        {
+            return;
+        }
+
+        PlayerNetworkHealth reviverHealth = reviverObject.GetComponent<PlayerNetworkHealth>();
+
+        if (reviverHealth != null && reviverHealth.State != PlayerLifeState.Alive)
+        {
+            return;
+        }
+
+        float distance = Vector3.Distance(reviverObject.transform.position, transform.position);
+
+        if (distance > maxReviveDistance)
+        {
+            return;
+        }
+
+        ServerRevive();
+    }
+
+    private void ServerRevive()
+    {
+        serverBleedOutRemaining = 0f;
+        syncBleedOut.Value = 0f;
+        syncHealth.Value = Mathf.Clamp(reviveHealth, 1f, maxHealth);
+        syncState.Value = PlayerLifeState.Alive;
+
+        SetTeamDownedFlag(false);
+
+        Debug.Log(gameObject.name + " revived with " + syncHealth.Value + " HP.");
     }
 
     [ServerRpc]

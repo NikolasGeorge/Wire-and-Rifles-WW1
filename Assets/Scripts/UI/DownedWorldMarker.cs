@@ -5,6 +5,8 @@ using UnityEngine.UI;
 public class DownedWorldMarker : MonoBehaviour
 {
     public HealthComponent health;
+    [Tooltip("Networked player health source. When set (or auto-found), it takes priority over the HealthComponent above.")]
+    public PlayerNetworkHealth playerHealth;
     public PlayerTeam targetTeam;
     public PlayerTeam localPlayerTeam;
     public Camera playerCamera;
@@ -41,6 +43,11 @@ public class DownedWorldMarker : MonoBehaviour
 
     private void Awake()
     {
+        if (playerHealth == null)
+        {
+            playerHealth = GetComponentInParent<PlayerNetworkHealth>();
+        }
+
         if (health == null)
         {
             health = GetComponentInParent<HealthComponent>();
@@ -71,7 +78,7 @@ public class DownedWorldMarker : MonoBehaviour
 
     private void Update()
     {
-        if (health == null || markerRoot == null)
+        if ((health == null && playerHealth == null) || markerRoot == null)
         {
             return;
         }
@@ -79,6 +86,13 @@ public class DownedWorldMarker : MonoBehaviour
         if (playerCamera == null)
         {
             playerCamera = Camera.main;
+        }
+
+        // Players spawn and despawn at runtime, so the local team reference
+        // may not exist yet when this marker wakes up.
+        if (localPlayerTeam == null)
+        {
+            localPlayerTeam = FindLocalPlayerTeam();
         }
 
         bool shouldShow = ShouldShowMarker();
@@ -115,9 +129,20 @@ public class DownedWorldMarker : MonoBehaviour
         }
     }
 
+    private bool TargetIsDowned => playerHealth != null ? playerHealth.IsDowned : health != null && health.IsDowned;
+    private bool TargetIsDead => playerHealth != null ? playerHealth.IsDead : health != null && health.IsDead;
+    private float TargetBleedOutProgress01 => playerHealth != null ? playerHealth.BleedOutProgress01 : health != null ? health.BleedOutProgress01 : 0f;
+    private Transform TargetTransform => playerHealth != null ? playerHealth.transform : health != null ? health.transform : transform;
+
     private bool ShouldShowMarker()
     {
-        if (!health.IsDowned || health.IsDead)
+        if (!TargetIsDowned || TargetIsDead)
+        {
+            return false;
+        }
+
+        // The downed local player already gets the full-screen downed overlay.
+        if (playerHealth != null && playerHealth.IsOwner)
         {
             return false;
         }
@@ -170,7 +195,7 @@ public class DownedWorldMarker : MonoBehaviour
             return markerAnchor.position + anchorOffset;
         }
 
-        return health.transform.position + anchorOffset;
+        return TargetTransform.position + anchorOffset;
     }
 
     private void UpdateCircle()
@@ -181,7 +206,7 @@ public class DownedWorldMarker : MonoBehaviour
         }
 
         circleFill.fillClockwise = fillClockwise;
-        circleFill.fillAmount = health.BleedOutProgress01;
+        circleFill.fillAmount = TargetBleedOutProgress01;
     }
 
     private void UpdateText()
@@ -224,6 +249,16 @@ public class DownedWorldMarker : MonoBehaviour
 
     private PlayerTeam FindLocalPlayerTeam()
     {
+        // Networked: only the owned player's team counts as "local". A plain
+        // PlayerController lookup can land on a remote player's instance.
+        foreach (PlayerNetworkSetup setup in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+        {
+            if (setup.IsOwner)
+            {
+                return setup.GetComponent<PlayerTeam>();
+            }
+        }
+
         PlayerController playerController = FindAnyObjectByType<PlayerController>();
 
         if (playerController != null)

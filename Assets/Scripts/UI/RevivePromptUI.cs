@@ -43,6 +43,11 @@ public class RevivePromptUI : MonoBehaviour
         Show(0f, availableText);
     }
 
+    public void ShowAvailablePrompt(float savedProgress01)
+    {
+        Show(savedProgress01, availableText);
+    }
+
     public void ShowReviving(float progress01, string targetName)
     {
         string message = string.Format(revivingTextFormat, targetName);

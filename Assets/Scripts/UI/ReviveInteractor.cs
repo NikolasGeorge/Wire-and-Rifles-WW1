@@ -17,7 +17,9 @@ public class ReviveInteractor : MonoBehaviour
     public string reviverDisplayName = "Player";
     public bool useGettingRevivedStyleText = true;
 
-    private HealthComponent currentTarget;
+    // Either a PlayerNetworkHealth (networked player) or a HealthComponent
+    // (local practice dummy).
+    private Component currentTarget;
     private float reviveTimer;
 
     private void Awake()
@@ -51,11 +53,26 @@ public class ReviveInteractor : MonoBehaviour
             return;
         }
 
-        HealthComponent target = FindReviveTarget();
+        Component target = FindReviveTarget();
 
         if (target == null)
         {
-            HidePromptAndReset();
+            // Looking away hides the prompt but keeps the checkpointed
+            // progress for the remembered target, unless they are no longer
+            // revivable (revived by someone else, died, despawned).
+            if (currentTarget == null || !IsStillRevivable(currentTarget))
+            {
+                HidePromptAndReset();
+                return;
+            }
+
+            SnapTimerToCheckpoint();
+
+            if (revivePromptUI != null)
+            {
+                revivePromptUI.Hide();
+            }
+
             return;
         }
 
@@ -66,14 +83,17 @@ public class ReviveInteractor : MonoBehaviour
         }
 
         bool reviveHeld = Keyboard.current[reviveKey].isPressed;
+        float holdTime = Mathf.Max(0.01f, reviveHoldTime);
 
         if (!reviveHeld)
         {
-            reviveTimer = 0f;
+            // Releasing keeps the last completed quarter (25/50/75%) instead
+            // of resetting, so a briefly interrupted revive resumes from there.
+            float checkpoint = SnapTimerToCheckpoint();
 
             if (revivePromptUI != null)
             {
-                revivePromptUI.ShowAvailablePrompt();
+                revivePromptUI.ShowAvailablePrompt(checkpoint);
             }
 
             return;
@@ -81,7 +101,7 @@ public class ReviveInteractor : MonoBehaviour
 
         reviveTimer += Time.deltaTime;
 
-        float progress01 = Mathf.Clamp01(reviveTimer / Mathf.Max(0.01f, reviveHoldTime));
+        float progress01 = Mathf.Clamp01(reviveTimer / holdTime);
 
         if (revivePromptUI != null)
         {
@@ -97,18 +117,25 @@ public class ReviveInteractor : MonoBehaviour
 
         if (reviveTimer >= reviveHoldTime)
         {
-            bool revived = currentTarget.Revive();
-
-            if (revived)
+            if (currentTarget is PlayerNetworkHealth playerHealth)
             {
-                Debug.Log("Revived " + currentTarget.name);
+                // Networked player: the server validates and applies the revive.
+                playerHealth.RequestRevive();
+                Debug.Log("Requested revive of " + playerHealth.name);
+            }
+            else if (currentTarget is HealthComponent dummyHealth)
+            {
+                if (dummyHealth.Revive())
+                {
+                    Debug.Log("Revived " + dummyHealth.name);
+                }
             }
 
             HidePromptAndReset();
         }
     }
 
-    private HealthComponent FindReviveTarget()
+    private Component FindReviveTarget()
     {
         if (playerCamera == null || localPlayerTeam == null)
         {
@@ -123,7 +150,7 @@ public class ReviveInteractor : MonoBehaviour
             return null;
         }
 
-        HealthComponent closestValidTarget = null;
+        Component closestValidTarget = null;
         float closestDistance = float.MaxValue;
 
         foreach (RaycastHit hit in hits)
@@ -133,14 +160,28 @@ public class ReviveInteractor : MonoBehaviour
                 continue;
             }
 
-            HealthComponent health = hit.collider.GetComponentInParent<HealthComponent>();
+            Component candidate = null;
 
-            if (health == null)
+            PlayerNetworkHealth playerHealth = hit.collider.GetComponentInParent<PlayerNetworkHealth>();
+
+            if (playerHealth != null)
             {
-                continue;
+                if (playerHealth.CanBeRevivedBy(localPlayerTeam))
+                {
+                    candidate = playerHealth;
+                }
+            }
+            else
+            {
+                HealthComponent health = hit.collider.GetComponentInParent<HealthComponent>();
+
+                if (health != null && health.CanBeRevivedBy(localPlayerTeam))
+                {
+                    candidate = health;
+                }
             }
 
-            if (!health.CanBeRevivedBy(localPlayerTeam))
+            if (candidate == null)
             {
                 continue;
             }
@@ -148,11 +189,36 @@ public class ReviveInteractor : MonoBehaviour
             if (hit.distance < closestDistance)
             {
                 closestDistance = hit.distance;
-                closestValidTarget = health;
+                closestValidTarget = candidate;
             }
         }
 
         return closestValidTarget;
+    }
+
+    private float SnapTimerToCheckpoint()
+    {
+        float holdTime = Mathf.Max(0.01f, reviveHoldTime);
+        float checkpoint = Mathf.Floor(Mathf.Clamp01(reviveTimer / holdTime) / 0.25f) * 0.25f;
+        checkpoint = Mathf.Min(checkpoint, 0.75f);
+        reviveTimer = checkpoint * holdTime;
+
+        return checkpoint;
+    }
+
+    private bool IsStillRevivable(Component target)
+    {
+        if (target is PlayerNetworkHealth playerHealth)
+        {
+            return playerHealth.CanBeRevivedBy(localPlayerTeam);
+        }
+
+        if (target is HealthComponent dummyHealth)
+        {
+            return dummyHealth.CanBeRevivedBy(localPlayerTeam);
+        }
+
+        return false;
     }
 
     private void HidePromptAndReset()
