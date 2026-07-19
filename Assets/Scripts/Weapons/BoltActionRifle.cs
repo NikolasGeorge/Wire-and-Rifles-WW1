@@ -77,6 +77,21 @@ public class BoltActionRifle : NetworkBehaviour
 
     public int CurrentAmmo => currentAmmo;
     public int ReserveAmmo => reserveAmmo;
+
+    // Class loadouts override the WeaponData default reserve at spawn. Stored
+    // so Start() cannot stomp it regardless of callback ordering.
+    private int classReserveAmmoOverride = -1;
+
+    public void SetClassReserveAmmo(int reserve)
+    {
+        classReserveAmmoOverride = reserve;
+        reserveAmmo = reserve;
+
+        if (IsServerInitialized)
+        {
+            serverReserveAmmo = reserve;
+        }
+    }
     public bool IsReloading => isReloading;
     public bool IsEmpty => currentAmmo <= 0;
     public float RapidFireCurrentPenaltyPercent => rapidFireCurrentPenaltyPercent;
@@ -214,7 +229,7 @@ public class BoltActionRifle : NetworkBehaviour
         }
 
         currentAmmo = weaponData.clipSize;
-        reserveAmmo = weaponData.startingReserveAmmo;
+        reserveAmmo = classReserveAmmoOverride >= 0 ? classReserveAmmoOverride : weaponData.startingReserveAmmo;
 
         Debug.Log(weaponData.weaponName + " loaded. Ammo: " + currentAmmo + "/" + reserveAmmo);
     }
