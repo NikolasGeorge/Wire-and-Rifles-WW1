@@ -21,6 +21,33 @@ public class ReviveInteractor : MonoBehaviour
     // (local practice dummy).
     private Component currentTarget;
     private float reviveTimer;
+    private PlayerNetworkSetup localPlayerSetup;
+
+    // Only medics can revive networked players. Dummies stay revivable by
+    // anyone for testing.
+    private bool LocalPlayerCanRevivePlayers()
+    {
+        if (localPlayerSetup == null || !localPlayerSetup.IsOwner)
+        {
+            localPlayerSetup = null;
+
+            foreach (PlayerNetworkSetup setup in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+            {
+                if (setup.IsOwner)
+                {
+                    localPlayerSetup = setup;
+                    break;
+                }
+            }
+        }
+
+        if (localPlayerSetup == null)
+        {
+            return true;
+        }
+
+        return PlayerClasses.Get(localPlayerSetup.AssignedClass).canRevive;
+    }
 
     private void Awake()
     {
@@ -166,7 +193,7 @@ public class ReviveInteractor : MonoBehaviour
 
             if (playerHealth != null)
             {
-                if (playerHealth.CanBeRevivedBy(localPlayerTeam))
+                if (playerHealth.CanBeRevivedBy(localPlayerTeam) && LocalPlayerCanRevivePlayers())
                 {
                     candidate = playerHealth;
                 }

@@ -20,6 +20,8 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
     [Header("Downed")]
     public bool useDownedState = true;
+    [Tooltip("Second health pool granted on going down. Damage overflowing past 0 HP carries into it; burning through both in one hit (e.g. a 200-damage headshot) kills outright and skips the downed state.")]
+    public float downedHealth = 100f;
     public float bleedOutTime = 30f;
     public float giveUpDelay = 5f;
 
@@ -166,7 +168,10 @@ public class PlayerNetworkHealth : NetworkBehaviour
         }
     }
 
-    // Returns true when this damage fully killed the player.
+    // Returns true when this damage fully killed the player. While downed,
+    // health holds the downed pool. Overflow damage past 0 HP carries into
+    // that pool, so a single hit strong enough to burn through both pools
+    // kills outright and skips the downed state.
     public bool ServerTakeDamage(float damage)
     {
         if (!IsServerInitialized || damage <= 0f)
@@ -181,26 +186,46 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
         if (syncState.Value == PlayerLifeState.Downed)
         {
-            ServerFullDie("Finished while downed");
-            return true;
+            float remainingPool = syncHealth.Value - damage;
+
+            if (remainingPool <= 0f)
+            {
+                ServerFullDie("Finished while downed");
+                return true;
+            }
+
+            syncHealth.Value = remainingPool;
+            return false;
         }
 
-        float newHealth = Mathf.Max(0f, syncHealth.Value - damage);
-        syncHealth.Value = newHealth;
+        float newHealth = syncHealth.Value - damage;
 
         if (newHealth > 0f)
         {
+            syncHealth.Value = newHealth;
             return false;
         }
 
-        if (useDownedState)
+        if (!useDownedState)
         {
-            ServerEnterDowned();
-            return false;
+            syncHealth.Value = 0f;
+            ServerFullDie("Killed");
+            return true;
         }
 
-        ServerFullDie("Killed");
-        return true;
+        float overflow = -newHealth;
+        float downedPool = downedHealth - overflow;
+
+        if (downedPool <= 0f)
+        {
+            syncHealth.Value = 0f;
+            ServerFullDie("Overkill");
+            return true;
+        }
+
+        syncHealth.Value = downedPool;
+        ServerEnterDowned();
+        return false;
     }
 
     private void ServerEnterDowned()
@@ -236,9 +261,18 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
     private void ServerRespawn()
     {
-        syncHealth.Value = maxHealth;
-        syncBleedOut.Value = 0f;
-        syncState.Value = PlayerLifeState.Alive;
+        // Despawn instead of respawning in place: the owner drops back to the
+        // class selection screen and requests a fresh spawn from there.
+        Despawn();
+    }
+
+    // Server-side helper for class stats applied right after spawn.
+    public void ServerResetHealthToMax()
+    {
+        if (IsServerInitialized && syncState.Value == PlayerLifeState.Alive)
+        {
+            syncHealth.Value = maxHealth;
+        }
     }
 
     // Client-side eligibility check used by ReviveInteractor before it shows
@@ -301,14 +335,22 @@ public class PlayerNetworkHealth : NetworkBehaviour
             return;
         }
 
-        ServerRevive();
+        // Only medics can revive players, and they restore full health.
+        PlayerNetworkSetup reviverSetup = reviverObject.GetComponent<PlayerNetworkSetup>();
+
+        if (reviverSetup == null || !PlayerClasses.Get(reviverSetup.AssignedClass).canRevive)
+        {
+            return;
+        }
+
+        ServerRevive(maxHealth);
     }
 
-    private void ServerRevive()
+    private void ServerRevive(float restoredHealth)
     {
         serverBleedOutRemaining = 0f;
         syncBleedOut.Value = 0f;
-        syncHealth.Value = Mathf.Clamp(reviveHealth, 1f, maxHealth);
+        syncHealth.Value = Mathf.Clamp(restoredHealth, 1f, maxHealth);
         syncState.Value = PlayerLifeState.Alive;
 
         SetTeamDownedFlag(false);

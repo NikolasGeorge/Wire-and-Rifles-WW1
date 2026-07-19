@@ -105,3 +105,7 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# Imported asset-pack archive kept locally, not in the repo
+Assets/Stylized World War 1 - Western front.zip
+Assets/Stylized World War 1 - Western front.zip.meta
