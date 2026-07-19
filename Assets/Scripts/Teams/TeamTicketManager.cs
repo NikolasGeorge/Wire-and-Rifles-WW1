@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using FishNet.Object;
 using FishNet.Object.Synchronizing;
 using UnityEngine;
@@ -28,6 +29,23 @@ public class TeamTicketManager : NetworkBehaviour
     private readonly SyncVar<int> syncCentralTickets = new SyncVar<int>();
 
     private float bleedTimer;
+    private float objectivesRefreshTimer;
+
+    // Fish-Net keeps scene NetworkObjects (the capture zones) deactivated
+    // until their spawn message arrives, so a plain type search at Awake can
+    // permanently miss zones that spawn later, understating the objective
+    // count used for the majority-bleed threshold. Rescan periodically,
+    // including inactive objects, until every configured zone is found.
+    private void RefreshObjectivesList()
+    {
+        List<ObjectiveCaptureZone> found = new List<ObjectiveCaptureZone>(
+            FindObjectsByType<ObjectiveCaptureZone>(FindObjectsInactive.Include, FindObjectsSortMode.None));
+
+        if (found.Count > 0)
+        {
+            objectives = found.ToArray();
+        }
+    }
 
     // True on a connected client that is not the server. Offline single-player
     // keeps the original fully-local behavior.
@@ -46,10 +64,7 @@ public class TeamTicketManager : NetworkBehaviour
         alliedPowersTickets = startingTickets;
         centralPowersTickets = startingTickets;
 
-        if (objectives == null || objectives.Length == 0)
-        {
-            objectives = FindObjectsByType<ObjectiveCaptureZone>(FindObjectsSortMode.None);
-        }
+        RefreshObjectivesList();
 
         syncAlliedTickets.OnChange += OnAlliedTicketsSynced;
         syncCentralTickets.OnChange += OnCentralTicketsSynced;
@@ -92,6 +107,14 @@ public class TeamTicketManager : NetworkBehaviour
         if (IsRemoteClientOnly)
         {
             return;
+        }
+
+        objectivesRefreshTimer += Time.deltaTime;
+
+        if (objectivesRefreshTimer >= 1f)
+        {
+            objectivesRefreshTimer = 0f;
+            RefreshObjectivesList();
         }
 
         if (!enableObjectiveTicketBleed)

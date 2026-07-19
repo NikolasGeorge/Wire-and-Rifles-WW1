@@ -13,6 +13,10 @@ public class ObjectiveHUDLayout : MonoBehaviour
     public float yPosition = 0f;
     public bool flipOrderForCentralPowers = true;
 
+    [Tooltip("Anchor the marker row to the top-center of the screen, this far down from the top edge.")]
+    public bool anchorToTop = true;
+    public float topOffset = 70f;
+
     private void Awake()
     {
         if (localPlayerTeam == null)
@@ -178,7 +182,22 @@ public class ObjectiveHUDLayout : MonoBehaviour
             int visualIndex = flipOrder ? count - 1 - i : i;
             float centeredIndex = visualIndex - ((count - 1) * 0.5f);
 
-            markerRect.anchoredPosition = new Vector2(centeredIndex * markerSpacing, yPosition);
+            if (anchorToTop && Application.isPlaying)
+            {
+                // Place in absolute screen space so the row sits at the top
+                // of the SCREEN no matter what panel the markers live under.
+                Canvas canvas = markerRect.GetComponentInParent<Canvas>();
+                float scale = canvas != null ? canvas.scaleFactor : 1f;
+
+                markerRect.position = new Vector3(
+                    Screen.width * 0.5f + centeredIndex * markerSpacing * scale,
+                    Screen.height - (topOffset + yPosition) * scale,
+                    0f);
+            }
+            else
+            {
+                markerRect.anchoredPosition = new Vector2(centeredIndex * markerSpacing, yPosition);
+            }
         }
     }
 

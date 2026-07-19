@@ -21,7 +21,10 @@ public class PlayerNetworkHealth : NetworkBehaviour
     [Header("Downed")]
     public bool useDownedState = true;
     [Tooltip("Second health pool granted on going down. Damage overflowing past 0 HP carries into it; burning through both in one hit (e.g. a 200-damage headshot) kills outright and skips the downed state.")]
-    public float downedHealth = 100f;
+    // Downed buffer: overflow past standing HP eats into this; 100 standing
+    // + 50 buffer means 150+ total damage from full health is a no-revive
+    // full kill.
+    public float downedHealth = 50f;
     public float bleedOutTime = 30f;
     public float giveUpDelay = 5f;
 
@@ -32,6 +35,14 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
     [Header("Respawn")]
     public float respawnDelay = 3f;
+
+    [Header("Spawn Protection")]
+    [Tooltip("Seconds of invulnerability after spawning. Firing your weapon ends it early.")]
+    public float spawnProtectionDuration = 4f;
+
+    [Header("Hit Feedback")]
+    public Color damageFlashColor = new Color(0.8f, 0.05f, 0.05f, 0.4f);
+    public float damageFlashFadeTime = 0.45f;
 
     [Header("Downed Pose")]
     public Vector3 downedBodyLocalPosition = new Vector3(0f, 0.35f, 0f);
@@ -53,6 +64,9 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
     private float serverBleedOutRemaining;
     private float serverRespawnTimer;
+    private float serverSpawnProtectedUntil;
+    private float ownerSpawnTime;
+    private float damageFlashStrength;
 
     public PlayerLifeState State => syncState.Value;
     public bool IsDowned => State == PlayerLifeState.Downed;
@@ -81,6 +95,7 @@ public class PlayerNetworkHealth : NetworkBehaviour
         }
 
         syncState.OnChange += OnStateChanged;
+        syncHealth.OnChange += OnHealthSynced;
 
         EnsureDownedMarker();
     }
@@ -128,6 +143,52 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
         syncHealth.Value = maxHealth;
         syncState.Value = PlayerLifeState.Alive;
+        serverSpawnProtectedUntil = Time.time + spawnProtectionDuration;
+    }
+
+    public override void OnStartClient()
+    {
+        base.OnStartClient();
+
+        if (IsOwner)
+        {
+            ownerSpawnTime = Time.time;
+        }
+    }
+
+    private void OnHealthSynced(float previous, float next, bool asServer)
+    {
+        if (asServer)
+        {
+            return;
+        }
+
+        if (IsOwner && next < previous)
+        {
+            damageFlashStrength = 1f;
+        }
+    }
+
+    // Called by the rifle when the owner fires: shooting ends protection.
+    public void ServerCancelSpawnProtection()
+    {
+        serverSpawnProtectedUntil = 0f;
+    }
+
+    // Server-side healing from med crates. Only tops up living players.
+    public void ServerHeal(float amount)
+    {
+        if (!IsServerInitialized || syncState.Value != PlayerLifeState.Alive)
+        {
+            return;
+        }
+
+        if (syncHealth.Value >= maxHealth)
+        {
+            return;
+        }
+
+        syncHealth.Value = Mathf.Min(maxHealth, syncHealth.Value + amount);
     }
 
     private void Update()
@@ -140,6 +201,12 @@ public class PlayerNetworkHealth : NetworkBehaviour
         if (IsOwner)
         {
             OwnerUpdate();
+
+            if (damageFlashStrength > 0f)
+            {
+                damageFlashStrength = Mathf.MoveTowards(
+                    damageFlashStrength, 0f, Time.deltaTime / Mathf.Max(0.05f, damageFlashFadeTime));
+            }
         }
     }
 
@@ -180,6 +247,11 @@ public class PlayerNetworkHealth : NetworkBehaviour
         }
 
         if (syncState.Value == PlayerLifeState.Dead)
+        {
+            return false;
+        }
+
+        if (Time.time < serverSpawnProtectedUntil)
         {
             return false;
         }
@@ -249,7 +321,9 @@ public class PlayerNetworkHealth : NetworkBehaviour
         syncBleedOut.Value = 0f;
         serverRespawnTimer = respawnDelay;
 
-        SetTeamDownedFlag(false);
+        // Dead bodies must not count as objective presence: keep the
+        // incapacitated flag set until the corpse despawns.
+        SetTeamDownedFlag(true);
 
         Debug.Log(gameObject.name + " died. Reason: " + reason);
 
@@ -401,7 +475,44 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
     private void OnGUI()
     {
-        if (!IsOwner || !IsDowned)
+        if (!IsOwner)
+        {
+            return;
+        }
+
+        GuiScale.Begin();
+
+        if (damageFlashStrength > 0f)
+        {
+            Color flash = damageFlashColor;
+            flash.a *= damageFlashStrength;
+            GUI.color = flash;
+            GUI.DrawTexture(new Rect(0f, 0f, GuiScale.Width, GuiScale.Height), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+        }
+
+        DrawHealthBar();
+
+        if (State == PlayerLifeState.Alive)
+        {
+            float protectedRemaining = spawnProtectionDuration - (Time.time - ownerSpawnTime);
+
+            if (protectedRemaining > 0f)
+            {
+                GUIStyle protectionStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = 16,
+                    fontStyle = FontStyle.Bold
+                };
+                protectionStyle.normal.textColor = new Color(1f, 1f, 1f, 0.85f);
+
+                GUI.Label(new Rect(0f, GuiScale.Height * 0.12f, GuiScale.Width, 30f),
+                    "SPAWN PROTECTION " + Mathf.CeilToInt(protectedRemaining) + "s", protectionStyle);
+            }
+        }
+
+        if (!IsDowned)
         {
             return;
         }
@@ -427,7 +538,44 @@ public class PlayerNetworkHealth : NetworkBehaviour
             text += "\nGive up available in " + Mathf.CeilToInt(giveUpAvailableIn) + "s";
         }
 
-        GUI.Label(new Rect(0f, Screen.height * 0.55f, Screen.width, 120f), text, style);
+        GUI.Label(new Rect(0f, GuiScale.Height * 0.55f, GuiScale.Width, 120f), text, style);
+    }
+
+    // Bottom-left health bar. While downed it shows the remaining downed pool.
+    private void DrawHealthBar()
+    {
+        if (IsDead)
+        {
+            return;
+        }
+
+        const float barWidth = 220f;
+        const float barHeight = 16f;
+        float x = 24f;
+        float y = GuiScale.Height - 46f;
+
+        float maxPool = IsDowned ? downedHealth : maxHealth;
+        float fill01 = maxPool <= 0f ? 0f : Mathf.Clamp01(CurrentHealth / maxPool);
+
+        GUI.color = new Color(0f, 0f, 0f, 0.55f);
+        GUI.DrawTexture(new Rect(x - 2f, y - 2f, barWidth + 4f, barHeight + 4f), Texture2D.whiteTexture);
+
+        GUI.color = IsDowned
+            ? new Color(0.85f, 0.3f, 0.15f, 0.9f)
+            : Color.Lerp(new Color(0.85f, 0.2f, 0.15f, 0.9f), new Color(0.3f, 0.8f, 0.3f, 0.9f), fill01);
+        GUI.DrawTexture(new Rect(x, y, barWidth * fill01, barHeight), Texture2D.whiteTexture);
+        GUI.color = Color.white;
+
+        GUIStyle textStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 13,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleLeft
+        };
+        textStyle.normal.textColor = Color.white;
+
+        GUI.Label(new Rect(x + 4f, y - 1f, barWidth, barHeight + 2f),
+            Mathf.CeilToInt(CurrentHealth) + " / " + Mathf.CeilToInt(maxPool), textStyle);
     }
 
     // ---- All clients: visuals from replicated state ----
@@ -444,9 +592,10 @@ public class PlayerNetworkHealth : NetworkBehaviour
         ApplyDownedVisuals(next != PlayerLifeState.Alive);
 
         // Client-side team flag so capture eligibility looks right everywhere.
+        // Dead counts as incapacitated too, so corpses never contest a zone.
         if (playerTeam != null)
         {
-            playerTeam.isDowned = next == PlayerLifeState.Downed;
+            playerTeam.isDowned = next != PlayerLifeState.Alive;
         }
 
         if (previous == PlayerLifeState.Dead && next == PlayerLifeState.Alive && IsOwner && setup != null)
@@ -455,15 +604,70 @@ public class PlayerNetworkHealth : NetworkBehaviour
         }
     }
 
+    private Transform soldierModel;
+    private Vector3 modelStandingLocalPosition;
+    private Quaternion modelStandingLocalRotation;
+    private bool modelPoseCached;
+
+    // Downed/dead bodies should not physically block living players.
+    private void SetBodyCollisionIgnored(bool ignored)
+    {
+        Collider[] ownColliders = GetComponentsInChildren<Collider>(true);
+
+        foreach (CharacterController controller in FindObjectsByType<CharacterController>(FindObjectsSortMode.None))
+        {
+            if (controller.transform == transform)
+            {
+                continue;
+            }
+
+            foreach (Collider ownCollider in ownColliders)
+            {
+                if (ownCollider != null && ownCollider.enabled)
+                {
+                    Physics.IgnoreCollision(ownCollider, controller, ignored);
+                }
+            }
+        }
+    }
+
     private void ApplyDownedVisuals(bool downed)
     {
+        SetBodyCollisionIgnored(downed);
+
         if (setup != null && setup.remoteBody != null)
         {
             Transform body = setup.remoteBody.transform;
-            body.localPosition = downed ? downedBodyLocalPosition : standingBodyLocalPosition;
-            body.localRotation = downed
-                ? standingBodyLocalRotation * Quaternion.Euler(downedBodyLocalEulerAngles)
-                : standingBodyLocalRotation;
+
+            if (soldierModel == null)
+            {
+                soldierModel = body.Find("SoldierModel");
+            }
+
+            if (soldierModel != null)
+            {
+                // Soldier model: pivot is at the feet, so rotating it in
+                // place lays the body down at ground level instead of
+                // swinging it around the capsule's offset center.
+                if (!modelPoseCached)
+                {
+                    modelStandingLocalPosition = soldierModel.localPosition;
+                    modelStandingLocalRotation = soldierModel.localRotation;
+                    modelPoseCached = true;
+                }
+
+                soldierModel.localPosition = modelStandingLocalPosition;
+                soldierModel.localRotation = downed
+                    ? modelStandingLocalRotation * Quaternion.Euler(-90f, 0f, 0f)
+                    : modelStandingLocalRotation;
+            }
+            else
+            {
+                body.localPosition = downed ? downedBodyLocalPosition : standingBodyLocalPosition;
+                body.localRotation = downed
+                    ? standingBodyLocalRotation * Quaternion.Euler(downedBodyLocalEulerAngles)
+                    : standingBodyLocalRotation;
+            }
         }
 
         if (!IsOwner)

@@ -22,8 +22,24 @@ public class ClassSpawnManager : NetworkBehaviour
         Instance = this;
     }
 
+    // Zones in HUD order (sorted by letter), shared with the spawn-select UI.
+    public static List<ObjectiveCaptureZone> GetZonesSortedByLetter()
+    {
+        List<ObjectiveCaptureZone> zones = new List<ObjectiveCaptureZone>(
+            FindObjectsByType<ObjectiveCaptureZone>(FindObjectsInactive.Include, FindObjectsSortMode.None));
+
+        zones.Sort((a, b) => string.CompareOrdinal(a.objectiveLetter, b.objectiveLetter));
+
+        return zones;
+    }
+
+    // requestedTeam: the player's own pick from the join screen; Neutral
+    // falls back to the alternating auto-assignment.
+    // weaponIndex indexes the class's weaponOptions (validated server-side).
+    // spawnObjectiveIndex: -1 spawns at the team base; otherwise an index
+    // into GetZonesSortedByLetter(), valid only while that team owns the zone.
     [ServerRpc(RequireOwnership = false)]
-    public void RequestSpawn(PlayerClass playerClass, NetworkConnection sender = null)
+    public void RequestSpawn(Team requestedTeam, PlayerClass playerClass, int weaponIndex, int spawnObjectiveIndex, NetworkConnection sender = null)
     {
         if (sender == null || playerPrefab == null)
         {
@@ -36,7 +52,14 @@ public class ClassSpawnManager : NetworkBehaviour
             return;
         }
 
-        if (!teamAssignments.TryGetValue(sender.ClientId, out Team team))
+        Team team;
+
+        if (requestedTeam == Team.AlliedPowers || requestedTeam == Team.CentralPowers)
+        {
+            team = requestedTeam;
+            teamAssignments[sender.ClientId] = team;
+        }
+        else if (!teamAssignments.TryGetValue(sender.ClientId, out team))
         {
             team = teamAssignCounter % 2 == 0 ? Team.AlliedPowers : Team.CentralPowers;
             teamAssignCounter++;
@@ -45,12 +68,30 @@ public class ClassSpawnManager : NetworkBehaviour
 
         Vector3 position = Vector3.zero;
         Quaternion rotation = Quaternion.identity;
-        Transform spawnPoint = TeamSpawnArea.GetSpawnPoint(team);
+        bool positioned = false;
 
-        if (spawnPoint != null)
+        if (spawnObjectiveIndex >= 0)
         {
-            position = spawnPoint.position;
-            rotation = Quaternion.Euler(0f, spawnPoint.eulerAngles.y, 0f);
+            List<ObjectiveCaptureZone> zones = GetZonesSortedByLetter();
+
+            if (spawnObjectiveIndex < zones.Count && zones[spawnObjectiveIndex].controllingTeam == team)
+            {
+                float angle = Random.Range(0f, Mathf.PI * 2f);
+                Vector3 ringOffset = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle)) * 2.5f;
+                position = zones[spawnObjectiveIndex].transform.position + ringOffset + Vector3.up * 0.5f;
+                positioned = true;
+            }
+        }
+
+        if (!positioned)
+        {
+            Transform spawnPoint = TeamSpawnArea.GetSpawnPoint(team);
+
+            if (spawnPoint != null)
+            {
+                position = spawnPoint.position;
+                rotation = Quaternion.Euler(0f, spawnPoint.eulerAngles.y, 0f);
+            }
         }
 
         NetworkObject instance = Instantiate(playerPrefab, position, rotation);
@@ -61,6 +102,12 @@ public class ClassSpawnManager : NetworkBehaviour
         {
             setup.pendingTeam = team;
             setup.pendingClass = playerClass;
+
+            WeaponId[] options = PlayerClasses.Get(playerClass).weaponOptions;
+            int clampedIndex = options != null && options.Length > 0
+                ? Mathf.Clamp(weaponIndex, 0, options.Length - 1)
+                : -1;
+            setup.pendingWeapon = clampedIndex >= 0 ? options[clampedIndex] : WeaponId.BoltAction;
         }
 
         ServerManager.Spawn(instance, sender);

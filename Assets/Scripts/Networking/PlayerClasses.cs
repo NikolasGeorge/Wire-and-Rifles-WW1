@@ -31,6 +31,11 @@ public struct PlayerClassDefinition
     public float buildDigMultiplier;
 
     public string weapon;
+
+    // Selectable primaries; index 0 is the default. Only Assault has more
+    // than one.
+    public WeaponId[] weaponOptions;
+
     public string grenade;
     public string equipmentSlot1;
     public string equipmentSlot2;
@@ -53,7 +58,8 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 1f,
-            weapon = "Bolt-Action Rifle",
+            weapon = "Semi-Auto / Bolt-Action / Shotgun",
+            weaponOptions = new[] { WeaponId.SemiAutoRifle, WeaponId.BoltAction, WeaponId.Shotgun },
             grenade = "Frag Grenade",
             equipmentSlot1 = "Ammo Pouch",
             equipmentSlot2 = "Bandages",
@@ -69,7 +75,8 @@ public static class PlayerClasses
             canRevive = true,
             canSpot = false,
             buildDigMultiplier = 1f,
-            weapon = "Bolt-Action Rifle",
+            weapon = "Service Pistol",
+            weaponOptions = new[] { WeaponId.Pistol },
             grenade = "Smoke Grenade",
             equipmentSlot1 = "Medical Kit",
             equipmentSlot2 = "Bandages",
@@ -85,7 +92,8 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 1f,
-            weapon = "Bolt-Action Rifle",
+            weapon = "LMG (deployed fire)",
+            weaponOptions = new[] { WeaponId.Lmg },
             grenade = "Stick Grenade",
             equipmentSlot1 = "Ammo Crate",
             equipmentSlot2 = "Trench Shovel",
@@ -101,7 +109,8 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = true,
             buildDigMultiplier = 1f,
-            weapon = "Bolt-Action Rifle",
+            weapon = "Scoped Bolt-Action (6x)",
+            weaponOptions = new[] { WeaponId.ScopedBoltAction },
             grenade = "Flare Grenade",
             equipmentSlot1 = "Flare Gun (spots enemies)",
             equipmentSlot2 = "Binoculars",
@@ -118,6 +127,7 @@ public static class PlayerClasses
             canSpot = false,
             buildDigMultiplier = 1.5f,
             weapon = "Bolt-Action Rifle",
+            weaponOptions = new[] { WeaponId.BoltAction },
             grenade = "Incendiary Grenade",
             equipmentSlot1 = "Wirecutters",
             equipmentSlot2 = "Repair Tool",
@@ -133,7 +143,8 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 1f,
-            weapon = "Bolt-Action Rifle",
+            weapon = "Service Pistol",
+            weaponOptions = new[] { WeaponId.Pistol },
             grenade = "Smoke Grenade",
             equipmentSlot1 = "Command Whistle",
             equipmentSlot2 = "Field Map",

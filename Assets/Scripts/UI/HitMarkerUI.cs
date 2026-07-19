@@ -37,6 +37,9 @@ public class HitMarkerUI : MonoBehaviour
     [Header("Damage")]
     public bool roundDamage = true;
 
+    [Tooltip("Hits arriving within this window (e.g. shotgun pellets landing the same frame) are summed into one marker instead of flickering separately.")]
+    public float damageBufferWindow = 0.05f;
+
     [Header("Colors")]
     public Color normalHitColor = Color.white;
     public Color killHitColor = Color.red;
@@ -45,6 +48,11 @@ public class HitMarkerUI : MonoBehaviour
     private Coroutine animationCoroutine;
     private GameObject activeGroup;
     private bool activeHitIsKill;
+
+    private Coroutine bufferCoroutine;
+    private float bufferedDamage;
+    private bool bufferedIsKill;
+    private bool bufferedIsHeadshot;
 
     private class LineData
     {
@@ -109,6 +117,38 @@ public class HitMarkerUI : MonoBehaviour
             return;
         }
 
+        // Accumulate into a short buffer so a shotgun blast's pellets, which
+        // each resolve their own hit independently and can land in different
+        // frames, are reported as one combined-damage marker instead of
+        // several flickering ones.
+        bufferedDamage += damageAmount;
+        bufferedIsKill |= isKill;
+        bufferedIsHeadshot |= isHeadshot;
+
+        if (bufferCoroutine == null)
+        {
+            bufferCoroutine = StartCoroutine(FlushBufferedHit());
+        }
+    }
+
+    private IEnumerator FlushBufferedHit()
+    {
+        yield return new WaitForSeconds(damageBufferWindow);
+
+        float damageAmount = bufferedDamage;
+        bool isKill = bufferedIsKill;
+        bool isHeadshot = bufferedIsHeadshot;
+
+        bufferedDamage = 0f;
+        bufferedIsKill = false;
+        bufferedIsHeadshot = false;
+        bufferCoroutine = null;
+
+        DisplayHitMarker(damageAmount, isKill, isHeadshot);
+    }
+
+    private void DisplayHitMarker(float damageAmount, bool isKill, bool isHeadshot)
+    {
         activeGroup = GetGroupForHit(isKill, isHeadshot);
         activeHitIsKill = isKill;
 

@@ -24,6 +24,8 @@ public class PlayerController : NetworkBehaviour
 
     private CharacterController characterController;
     private Vector3 verticalVelocity;
+    private float environmentSlowMultiplier = 1f;
+    private float environmentSlowUntil;
     private Vector2 currentMoveInput;
     private float pitch;
     private bool isMoving;
@@ -123,6 +125,13 @@ public class PlayerController : NetworkBehaviour
         float currentSpeed = isSprinting ? sprintSpeed : walkSpeed;
         currentSpeed *= Mathf.Max(0f, weaponMoveSpeedMultiplier);
 
+        // Environmental slow (barbed wire). Re-applied every frame the player
+        // stays inside a zone; expires on its own shortly after leaving.
+        if (Time.time < environmentSlowUntil)
+        {
+            currentSpeed *= environmentSlowMultiplier;
+        }
+
         Vector3 moveDirection = transform.right * moveInput.x + transform.forward * moveInput.y;
 
         if (grounded && Keyboard.current.spaceKey.wasPressedThisFrame)
@@ -141,6 +150,12 @@ public class PlayerController : NetworkBehaviour
     public void SetWeaponMoveSpeedMultiplier(float multiplier)
     {
         weaponMoveSpeedMultiplier = Mathf.Max(0f, multiplier);
+    }
+
+    public void ApplyEnvironmentSlow(float multiplier, float duration = 0.25f)
+    {
+        environmentSlowMultiplier = Mathf.Clamp01(multiplier);
+        environmentSlowUntil = Time.time + duration;
     }
 
     public void AddCameraRecoil(float pitchKick, float yawKick)

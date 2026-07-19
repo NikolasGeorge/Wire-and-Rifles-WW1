@@ -46,6 +46,18 @@ public class BoltActionRifle : NetworkBehaviour
     [Range(0f, 1f)]
     public float aimAccuracy01;
 
+    [Header("Class Weapon")]
+    public WeaponFireMode fireMode = WeaponFireMode.BoltAction;
+    public float damageMid = -1f;
+    public float damageLong = -1f;
+    public float closeRangeEnd = 50f;
+    public float midRangeEnd = 100f;
+    public int pelletsPerShot = 1;
+    public float pelletSpreadAngle = 10f;
+    public bool shellByShellReload;
+    public bool requiresDeploySetup;
+    public float deploySetupTime = 1.5f;
+
     [Header("Headshot")]
     public float headshotDamageMultiplier = 2f;
 
@@ -81,6 +93,101 @@ public class BoltActionRifle : NetworkBehaviour
     // Class loadouts override the WeaponData default reserve at spawn. Stored
     // so Start() cannot stomp it regardless of callback ordering.
     private int classReserveAmmoOverride = -1;
+
+    private float deployTimer;
+    private float lastDeployBlockedFireTime = -999f;
+
+    public bool IsDeployed => !requiresDeploySetup || deployTimer >= deploySetupTime;
+
+    // Replaces the shared WeaponData with a per-instance copy carrying this
+    // class's primary stats. Runs on every instance (server and clients) from
+    // PlayerNetworkSetup.ApplyClass, so all sides agree on damage, fire rate,
+    // and clip size, and the server's fire-rate validation uses the right
+    // interval.
+    public void ApplyWeaponProfile(WeaponProfile profile)
+    {
+        if (weaponData == null)
+        {
+            return;
+        }
+
+        weaponData = Instantiate(weaponData);
+        weaponData.weaponName = profile.displayName;
+        weaponData.damage = profile.damageClose;
+        weaponData.range = profile.range;
+        weaponData.muzzleVelocity = profile.muzzleVelocity;
+        weaponData.clipSize = profile.clipSize;
+        weaponData.startingReserveAmmo = profile.reserveAmmo;
+        weaponData.boltCycleTime = profile.fireInterval;
+        weaponData.reloadTime = profile.reloadTime;
+        weaponData.baseInaccuracyAngle = profile.baseInaccuracyAngle;
+        weaponData.movingInaccuracyPenalty = profile.movingInaccuracyPenalty;
+        weaponData.airborneInaccuracyPenalty = profile.airborneInaccuracyPenalty;
+        weaponData.aimingInaccuracyMultiplier = profile.aimingInaccuracyMultiplier;
+        weaponData.aimAccuracyBuildTime = profile.aimAccuracyBuildTime;
+        weaponData.aimMoveSpeedMultiplier = profile.aimMoveSpeedMultiplier;
+        weaponData.useRapidFireAccuracyPenalty = profile.useRapidFirePenalty;
+
+        fireMode = profile.fireMode;
+        damageMid = profile.damageMid;
+        damageLong = profile.damageLong;
+        closeRangeEnd = profile.closeRangeEnd;
+        midRangeEnd = profile.midRangeEnd;
+        pelletsPerShot = Mathf.Max(1, profile.pelletsPerShot);
+        pelletSpreadAngle = profile.pelletSpreadAngle;
+        shellByShellReload = profile.shellByShellReload;
+        requiresDeploySetup = profile.requiresDeploySetup;
+        deploySetupTime = profile.deploySetupTime;
+        hipFieldOfView = profile.hipFieldOfView;
+        aimFieldOfView = profile.aimFieldOfView;
+
+        if (weaponRecoil != null)
+        {
+            weaponRecoil.hipRecoilMultiplier = profile.hipRecoilMultiplier;
+            weaponRecoil.aimRecoilMultiplier = profile.aimRecoilMultiplier;
+            weaponRecoil.cameraPitchKick = profile.cameraPitchKick;
+            weaponRecoil.cameraYawRandom = profile.cameraYawRandom;
+        }
+
+        currentAmmo = weaponData.clipSize;
+        SetClassReserveAmmo(profile.reserveAmmo);
+
+        if (IsServerInitialized)
+        {
+            serverCurrentAmmo = weaponData.clipSize;
+        }
+    }
+
+    // Server-side resupply from ammo crates: tops up the authoritative
+    // reserve (capped at the weapon's full loadout) and mirrors the new count
+    // back to the owning client.
+    public void ServerGrantReserveAmmo(int amount)
+    {
+        if (!IsServerInitialized || weaponData == null)
+        {
+            return;
+        }
+
+        int cap = classReserveAmmoOverride >= 0 ? classReserveAmmoOverride : weaponData.startingReserveAmmo;
+
+        if (serverReserveAmmo >= cap)
+        {
+            return;
+        }
+
+        serverReserveAmmo = Mathf.Min(cap, serverReserveAmmo + amount);
+
+        if (Owner != null && Owner.IsActive)
+        {
+            TargetReserveAmmoUpdated(Owner, serverReserveAmmo);
+        }
+    }
+
+    [TargetRpc]
+    private void TargetReserveAmmoUpdated(NetworkConnection connection, int newReserve)
+    {
+        reserveAmmo = newReserve;
+    }
 
     public void SetClassReserveAmmo(int reserve)
     {
@@ -249,7 +356,7 @@ public class BoltActionRifle : NetworkBehaviour
         if (weaponData != null)
         {
             serverCurrentAmmo = weaponData.clipSize;
-            serverReserveAmmo = weaponData.startingReserveAmmo;
+            serverReserveAmmo = classReserveAmmoOverride >= 0 ? classReserveAmmoOverride : weaponData.startingReserveAmmo;
         }
     }
 
@@ -264,12 +371,23 @@ public class BoltActionRifle : NetworkBehaviour
         UpdateAiming();
         UpdateWeaponSprintPose();
 
+        // LMG setup: deploying means holding aim in place for the setup time.
+        if (requiresDeploySetup)
+        {
+            bool movingBreaksDeploy = playerController != null && playerController.IsMoving;
+            deployTimer = isAiming && !movingBreaksDeploy ? deployTimer + Time.deltaTime : 0f;
+        }
+
         if (Mouse.current == null || Keyboard.current == null || weaponData == null)
         {
             return;
         }
 
-        if (Mouse.current.leftButton.wasPressedThisFrame)
+        bool firePressed = fireMode == WeaponFireMode.Automatic
+            ? Mouse.current.leftButton.isPressed
+            : Mouse.current.leftButton.wasPressedThisFrame;
+
+        if (firePressed)
         {
             TryFire();
         }
@@ -431,6 +549,12 @@ public class BoltActionRifle : NetworkBehaviour
             return;
         }
 
+        if (!IsDeployed)
+        {
+            lastDeployBlockedFireTime = Time.time;
+            return;
+        }
+
         if (currentAmmo <= 0)
         {
             Debug.Log("Empty. Press R to reload.");
@@ -454,6 +578,8 @@ public class BoltActionRifle : NetworkBehaviour
     {
         UpdateRapidFirePenaltyForShot();
 
+        // Capture the aim ray from the camera's orientation at the moment of
+        // the trigger pull, before recoil kicks the camera for the NEXT shot.
         Ray ray = GetShotRay();
 
         PlayFireSound();
@@ -463,6 +589,12 @@ public class BoltActionRifle : NetworkBehaviour
         {
             float recoilMultiplier = weaponRecoil.GetRecoilMultiplier(isAiming);
             weaponRecoil.ApplyRecoil(recoilMultiplier);
+        }
+
+        if (pelletsPerShot > 1)
+        {
+            FirePellets(ray);
+            return;
         }
 
         bool didHit = Physics.Raycast(ray, out RaycastHit hit, weaponData.range, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
@@ -490,6 +622,85 @@ public class BoltActionRifle : NetworkBehaviour
         ServerReportFire(shotStartPoint, shotEndPoint, didHit, hitNormal, targetObject, damageMultiplier, isHeadshot);
 
         StartCoroutine(ResolveShotAfterTravel(ray, didHit, hit, shotStartPoint, shotEndPoint, targetObject));
+    }
+
+    // Shotgun: every pellet gets its own spread ray and resolves its own
+    // impact/dummy damage locally, but pellets that hit the same networked
+    // target are combined into ONE server report whose damage multiplier is
+    // the sum of the per-pellet hitbox multipliers (weaponData.damage is
+    // per-pellet). Only the first networked target hit is reported — one
+    // trigger pull, one server-validated hit.
+    private void FirePellets(Ray aimRay)
+    {
+        Vector3 shotStartPoint = muzzlePoint != null ? muzzlePoint.position : playerCamera.transform.position;
+
+        NetworkObject reportTarget = null;
+        float reportMultiplier = 0f;
+        bool reportHeadshot = false;
+        Vector3 reportEndPoint = Vector3.zero;
+        Vector3 reportNormal = Vector3.zero;
+
+        // One aim ray (captured pre-recoil) carries the inaccuracy; every
+        // pellet then deviates within the fixed spread cone around it.
+        float spreadRadius = Mathf.Tan(pelletSpreadAngle * 0.5f * Mathf.Deg2Rad);
+
+        for (int pellet = 0; pellet < pelletsPerShot; pellet++)
+        {
+            float spreadAngle = Random.Range(0f, Mathf.PI * 2f);
+            float radius = Random.Range(0f, spreadRadius);
+
+            Vector3 pelletDirection = aimRay.direction;
+            pelletDirection += playerCamera.transform.right * Mathf.Cos(spreadAngle) * radius;
+            pelletDirection += playerCamera.transform.up * Mathf.Sin(spreadAngle) * radius;
+
+            Ray ray = new Ray(aimRay.origin, pelletDirection.normalized);
+            bool didHit = Physics.Raycast(ray, out RaycastHit hit, weaponData.range, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+
+            NetworkObject pelletTarget = null;
+
+            if (didHit)
+            {
+                pelletTarget = hit.collider.GetComponentInParent<NetworkObject>();
+
+                if (pelletTarget == NetworkObject)
+                {
+                    pelletTarget = null;
+                }
+
+                if (pelletTarget != null)
+                {
+                    GetHitboxInfo(hit.collider, out float pelletMultiplier, out bool pelletHeadshot);
+
+                    if (reportTarget == null)
+                    {
+                        reportTarget = pelletTarget;
+                        reportEndPoint = hit.point;
+                        reportNormal = hit.normal;
+                    }
+
+                    if (pelletTarget == reportTarget)
+                    {
+                        reportMultiplier += pelletMultiplier;
+                        reportHeadshot |= pelletHeadshot;
+                    }
+                }
+            }
+
+            Vector3 pelletEnd = didHit ? hit.point : ray.origin + ray.direction * weaponData.range;
+            StartCoroutine(ResolveShotAfterTravel(ray, didHit, hit, shotStartPoint, pelletEnd, pelletTarget));
+        }
+
+        if (reportTarget != null)
+        {
+            ServerReportFire(shotStartPoint, reportEndPoint, true, reportNormal, reportTarget, reportMultiplier, reportHeadshot);
+        }
+        else
+        {
+            // No networked victim: still report so the server spends the shell
+            // and observers get the fire effects.
+            Ray centerRay = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            ServerReportFire(shotStartPoint, shotStartPoint + centerRay.direction * weaponData.range, false, Vector3.zero, null, 1f, false);
+        }
     }
 
     private void UpdateRapidFirePenaltyForShot()
@@ -579,7 +790,8 @@ public class BoltActionRifle : NetworkBehaviour
 
             GetHitboxInfo(hit.collider, out float damageMultiplier, out bool isHeadshot);
 
-            float finalDamage = weaponData.damage * damageMultiplier;
+            float shotDistance = Vector3.Distance(shotStartPoint, shotEndPoint);
+            float finalDamage = GetBaseDamageAtDistance(shotDistance, isHeadshot) * damageMultiplier;
             bool killedTarget = health.TakeDamage(finalDamage);
 
             if (killedTarget && isHeadshot)
@@ -601,6 +813,34 @@ public class BoltActionRifle : NetworkBehaviour
         {
             Debug.LogWarning("No HealthComponent found on " + hit.collider.name + " or its parents.");
         }
+    }
+
+    // Base (pre-hitbox-multiplier) damage at a given shot distance. Headshots
+    // ignore falloff and always use the close-range value, so they stay
+    // rewarding at any range.
+    private float GetBaseDamageAtDistance(float distance, bool isHeadshot)
+    {
+        if (weaponData == null)
+        {
+            return 0f;
+        }
+
+        if (isHeadshot || damageMid < 0f)
+        {
+            return weaponData.damage;
+        }
+
+        if (distance <= closeRangeEnd)
+        {
+            return weaponData.damage;
+        }
+
+        if (distance <= midRangeEnd)
+        {
+            return damageMid;
+        }
+
+        return damageLong >= 0f ? damageLong : damageMid;
     }
 
     private bool IsFriendlyFireBlocked(PlayerTeam targetTeam)
@@ -814,7 +1054,12 @@ public class BoltActionRifle : NetworkBehaviour
             yield return new WaitForSeconds(delay);
         }
 
-        PlayBoltCycleSound();
+        // Semi-auto and automatic weapons reuse this coroutine purely as the
+        // fire interval; only real bolt actions get the bolt sound.
+        if (fireMode == WeaponFireMode.BoltAction)
+        {
+            PlayBoltCycleSound();
+        }
 
         float remainingTime = weaponData.boltCycleTime - delay;
 
@@ -862,13 +1107,27 @@ public class BoltActionRifle : NetworkBehaviour
 
         PlayReloadSound();
 
-        yield return new WaitForSeconds(weaponData.reloadTime);
+        if (shellByShellReload)
+        {
+            // Tube-fed: one shell per reloadTime until full or dry.
+            while (currentAmmo < weaponData.clipSize && reserveAmmo > 0)
+            {
+                yield return new WaitForSeconds(weaponData.reloadTime);
 
-        int ammoNeeded = weaponData.clipSize - currentAmmo;
-        int ammoToLoad = Mathf.Min(ammoNeeded, reserveAmmo);
+                currentAmmo++;
+                reserveAmmo--;
+            }
+        }
+        else
+        {
+            yield return new WaitForSeconds(weaponData.reloadTime);
 
-        currentAmmo += ammoToLoad;
-        reserveAmmo -= ammoToLoad;
+            int ammoNeeded = weaponData.clipSize - currentAmmo;
+            int ammoToLoad = Mathf.Min(ammoNeeded, reserveAmmo);
+
+            currentAmmo += ammoToLoad;
+            reserveAmmo -= ammoToLoad;
+        }
 
         isReloading = false;
 
@@ -902,6 +1161,14 @@ public class BoltActionRifle : NetworkBehaviour
         if (weaponData == null)
         {
             return;
+        }
+
+        // Attacking forfeits spawn protection.
+        PlayerNetworkHealth shooterHealth = GetComponent<PlayerNetworkHealth>();
+
+        if (shooterHealth != null)
+        {
+            shooterHealth.ServerCancelSpawnProtection();
         }
 
         if (serverIsReloading || serverCurrentAmmo <= 0)
@@ -940,7 +1207,7 @@ public class BoltActionRifle : NetworkBehaviour
             return;
         }
 
-        float clampedMultiplier = Mathf.Clamp(damageMultiplier, 0f, headshotDamageMultiplier);
+        float clampedMultiplier = Mathf.Clamp(damageMultiplier, 0f, headshotDamageMultiplier * Mathf.Max(1, pelletsPerShot));
 
         StartCoroutine(ServerApplyHitAfterTravel(Owner, targetObject, shotStartPoint, shotEndPoint, clampedMultiplier, isHeadshot));
     }
@@ -966,7 +1233,7 @@ public class BoltActionRifle : NetworkBehaviour
             yield break;
         }
 
-        float finalDamage = weaponData.damage * damageMultiplier;
+        float finalDamage = GetBaseDamageAtDistance(Vector3.Distance(shotStartPoint, shotEndPoint), isHeadshot) * damageMultiplier;
         bool killedTarget = false;
 
         PlayerNetworkHealth playerHealth = targetObject.GetComponent<PlayerNetworkHealth>();
@@ -1050,7 +1317,7 @@ public class BoltActionRifle : NetworkBehaviour
 
     private IEnumerator RemoteBoltCycleSound()
     {
-        if (weaponData.boltCycleSound == null)
+        if (weaponData.boltCycleSound == null || fireMode != WeaponFireMode.BoltAction)
         {
             yield break;
         }
@@ -1058,6 +1325,40 @@ public class BoltActionRifle : NetworkBehaviour
         yield return new WaitForSeconds(Mathf.Max(0f, weaponData.boltCycleSoundDelay));
 
         AudioSource.PlayClipAtPoint(weaponData.boltCycleSound, transform.position + Vector3.up * 1.5f, weaponData.boltCycleSoundVolume);
+    }
+
+    private void OnGUI()
+    {
+        if (!IsOwner || !requiresDeploySetup)
+        {
+            return;
+        }
+
+        string message = null;
+
+        if (isAiming && !IsDeployed)
+        {
+            message = "SETTING UP... " + Mathf.CeilToInt((deploySetupTime - deployTimer) * 10f) / 10f + "s";
+        }
+        else if (!isAiming && Time.time - lastDeployBlockedFireTime < 1.5f)
+        {
+            message = "HOLD AIM WHILE STANDING STILL TO DEPLOY";
+        }
+
+        if (message == null)
+        {
+            return;
+        }
+
+        GUIStyle style = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleCenter,
+            fontSize = 16,
+            fontStyle = FontStyle.Bold
+        };
+        style.normal.textColor = new Color(1f, 0.9f, 0.5f);
+
+        GUI.Label(new Rect(0f, Screen.height * 0.6f, Screen.width, 28f), message, style);
     }
 
     [ServerRpc]
@@ -1076,13 +1377,26 @@ public class BoltActionRifle : NetworkBehaviour
     {
         serverIsReloading = true;
 
-        yield return new WaitForSeconds(weaponData.reloadTime);
+        if (shellByShellReload)
+        {
+            while (serverCurrentAmmo < weaponData.clipSize && serverReserveAmmo > 0)
+            {
+                yield return new WaitForSeconds(weaponData.reloadTime);
 
-        int ammoNeeded = weaponData.clipSize - serverCurrentAmmo;
-        int ammoToLoad = Mathf.Min(ammoNeeded, serverReserveAmmo);
+                serverCurrentAmmo++;
+                serverReserveAmmo--;
+            }
+        }
+        else
+        {
+            yield return new WaitForSeconds(weaponData.reloadTime);
 
-        serverCurrentAmmo += ammoToLoad;
-        serverReserveAmmo -= ammoToLoad;
+            int ammoNeeded = weaponData.clipSize - serverCurrentAmmo;
+            int ammoToLoad = Mathf.Min(ammoNeeded, serverReserveAmmo);
+
+            serverCurrentAmmo += ammoToLoad;
+            serverReserveAmmo -= ammoToLoad;
+        }
 
         serverIsReloading = false;
     }
