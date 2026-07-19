@@ -39,6 +39,7 @@ public class ConnectionHud : MonoBehaviour
         bool serverStarted = networkManager.ServerManager.Started;
         bool clientStarted = networkManager.ClientManager.Started;
 
+        GuiScale.Begin();
         GUILayout.BeginArea(new Rect(10f, 10f, 160f, 120f));
 
         if (!serverStarted && !clientStarted)

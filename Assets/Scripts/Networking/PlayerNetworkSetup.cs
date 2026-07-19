@@ -12,6 +12,12 @@ public class PlayerNetworkSetup : NetworkBehaviour
     [Tooltip("Clone the soldier rig (with hitboxes) from a scene dummy of the matching team instead of showing the capsule.")]
     public bool useSoldierModelFromDummies = true;
 
+    [Tooltip("Idle/Run controller applied to the cloned rig's Animator.")]
+    public RuntimeAnimatorController soldierAnimatorController;
+
+    [Tooltip("Humanoid avatar of the soldier rig (Characters.fbx). Used when the cloned rig has no Animator of its own.")]
+    public Avatar soldierAvatar;
+
     private bool soldierModelCreated;
 
     // Server-assigned team, alternated per spawned player.
@@ -20,11 +26,33 @@ public class PlayerNetworkSetup : NetworkBehaviour
     // Server-assigned class, chosen on the class selection screen.
     private readonly SyncVar<PlayerClass> syncClass = new SyncVar<PlayerClass>();
 
+    // Chosen primary weapon (only Assault has more than one option).
+    private readonly SyncVar<WeaponId> syncWeapon = new SyncVar<WeaponId>();
+
+    [Header("Scout Flare Spotting")]
+    public float flareCooldown = 10f;
+    public float flareRange = 80f;
+    public float spotRadius = 20f;
+    public float spotDuration = 8f;
+
+    // Spot replication: the server bumps the pulse and sets the spotting team;
+    // every client restarts its local countdown on the pulse change.
+    private readonly SyncVar<int> syncSpotPulse = new SyncVar<int>();
+    private readonly SyncVar<Team> syncSpottedByTeam = new SyncVar<Team>();
+
+    private float spottedRemaining;
+    private float lastFlareTime = -999f;
+    private float serverLastFlareTime = -999f;
+
+    // The local player's first-person camera, for projecting spot markers.
+    public static Camera LocalPlayerCamera { get; private set; }
+
     private static int serverTeamAssignCounter;
 
     // Set by ClassSpawnManager on the server instance just before Spawn().
     [HideInInspector] public Team pendingTeam = Team.Neutral;
     [HideInInspector] public PlayerClass pendingClass = PlayerClass.Assault;
+    [HideInInspector] public WeaponId pendingWeapon = WeaponId.BoltAction;
 
     private bool classApplied;
 
@@ -42,6 +70,204 @@ public class PlayerNetworkSetup : NetworkBehaviour
     [Tooltip("Visible body other players see. Hidden on the owned player so it never blocks the first-person view.")]
     public GameObject remoteBody;
 
+    private void Awake()
+    {
+        syncSpotPulse.OnChange += OnSpotPulseChanged;
+    }
+
+    private void OnSpotPulseChanged(int previous, int next, bool asServer)
+    {
+        if (next > 0)
+        {
+            spottedRemaining = spotDuration;
+        }
+    }
+
+    private void Update()
+    {
+        if (spottedRemaining > 0f)
+        {
+            spottedRemaining -= Time.deltaTime;
+        }
+
+        if (!IsOwner)
+        {
+            return;
+        }
+
+        // Scout flare gun: G to fire, spots enemies around the landing point.
+        if (PlayerClasses.Get(AssignedClass).canSpot
+            && UnityEngine.InputSystem.Keyboard.current != null
+            && UnityEngine.InputSystem.Keyboard.current.gKey.wasPressedThisFrame
+            && Time.time - lastFlareTime >= flareCooldown)
+        {
+            Camera aimCamera = cameraRoot != null ? cameraRoot.GetComponent<Camera>() : null;
+
+            if (aimCamera != null)
+            {
+                lastFlareTime = Time.time;
+                Ray aimRay = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+                RequestFlare(aimRay.origin, aimRay.direction);
+            }
+        }
+    }
+
+    [ServerRpc]
+    private void RequestFlare(Vector3 origin, Vector3 direction)
+    {
+        if (!PlayerClasses.Get(AssignedClass).canSpot)
+        {
+            return;
+        }
+
+        if (Time.time - serverLastFlareTime < flareCooldown * 0.9f)
+        {
+            return;
+        }
+
+        serverLastFlareTime = Time.time;
+
+        Vector3 landing = Physics.Raycast(origin, direction, out RaycastHit hit, flareRange,
+            Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
+            ? hit.point
+            : origin + direction.normalized * flareRange;
+
+        ObserversFlareEffect(landing);
+
+        // Spot every living enemy near the flare.
+        foreach (PlayerNetworkSetup target in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+        {
+            if (target == this || target.AssignedTeam == AssignedTeam)
+            {
+                continue;
+            }
+
+            PlayerNetworkHealth targetHealth = target.GetComponent<PlayerNetworkHealth>();
+
+            if (targetHealth != null && targetHealth.IsDead)
+            {
+                continue;
+            }
+
+            if (Vector3.Distance(target.transform.position, landing) <= spotRadius)
+            {
+                target.ServerApplySpotted(AssignedTeam);
+            }
+        }
+    }
+
+    // Server: mark this player as spotted for the given team.
+    public void ServerApplySpotted(Team spottingTeam)
+    {
+        syncSpottedByTeam.Value = spottingTeam;
+        syncSpotPulse.Value = syncSpotPulse.Value + 1;
+        spottedRemaining = spotDuration;
+    }
+
+    [ObserversRpc]
+    private void ObserversFlareEffect(Vector3 landing)
+    {
+        GameObject flare = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        flare.name = "FlareEffect";
+        Destroy(flare.GetComponent<Collider>());
+        flare.transform.position = landing + Vector3.up * 0.4f;
+        flare.transform.localScale = Vector3.one * 0.35f;
+
+        Renderer flareRenderer = flare.GetComponent<Renderer>();
+        flareRenderer.material.color = Color.red;
+
+        Light flareLight = flare.AddComponent<Light>();
+        flareLight.color = new Color(1f, 0.25f, 0.15f);
+        flareLight.intensity = 4f;
+        flareLight.range = 18f;
+
+        Destroy(flare, spotDuration);
+    }
+
+    private void OnGUI()
+    {
+        DrawSpottedMarker();
+        DrawFlareCooldown();
+    }
+
+    // Red marker drawn over this player for enemies of the spotting team —
+    // screen-space, so it shows through walls.
+    private void DrawSpottedMarker()
+    {
+        if (spottedRemaining <= 0f || IsOwner)
+        {
+            return;
+        }
+
+        if (ClassSelectHud.LastKnownTeam != syncSpottedByTeam.Value)
+        {
+            return;
+        }
+
+        PlayerNetworkHealth targetHealth = GetComponent<PlayerNetworkHealth>();
+
+        if (targetHealth != null && targetHealth.IsDead)
+        {
+            return;
+        }
+
+        Camera viewer = LocalPlayerCamera;
+
+        if (viewer == null || !viewer.isActiveAndEnabled)
+        {
+            return;
+        }
+
+        Vector3 screenPoint = viewer.WorldToScreenPoint(transform.position + Vector3.up * 2.2f);
+
+        if (screenPoint.z <= 0f)
+        {
+            return;
+        }
+
+        GUIStyle markerStyle = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleCenter,
+            fontSize = 22,
+            fontStyle = FontStyle.Bold
+        };
+        markerStyle.normal.textColor = new Color(1f, 0.15f, 0.1f);
+
+        float x = screenPoint.x;
+        float y = Screen.height - screenPoint.y;
+
+        GUI.Label(new Rect(x - 40f, y - 16f, 80f, 24f), "▼", markerStyle);
+
+        GUIStyle distanceStyle = new GUIStyle(markerStyle) { fontSize = 11 };
+        float distance = Vector3.Distance(viewer.transform.position, transform.position);
+        GUI.Label(new Rect(x - 40f, y + 6f, 80f, 16f), Mathf.RoundToInt(distance) + "m", distanceStyle);
+    }
+
+    private void DrawFlareCooldown()
+    {
+        if (!IsOwner || !PlayerClasses.Get(AssignedClass).canSpot)
+        {
+            return;
+        }
+
+        float remaining = flareCooldown - (Time.time - lastFlareTime);
+
+        GUIStyle style = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 12,
+            alignment = TextAnchor.LowerRight
+        };
+        style.normal.textColor = remaining <= 0f
+            ? new Color(0.6f, 1f, 0.6f, 0.85f)
+            : new Color(1f, 1f, 1f, 0.6f);
+
+        string text = remaining <= 0f
+            ? "FLARE GUN (G): READY"
+            : "FLARE GUN (G): " + Mathf.CeilToInt(remaining) + "s";
+
+        GUI.Label(new Rect(0f, Screen.height - 58f, Screen.width - 16f, 44f), text, style);
+    }
+
     public override void OnStartServer()
     {
         base.OnStartServer();
@@ -57,6 +283,7 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
         syncTeam.Value = team;
         syncClass.Value = pendingClass;
+        syncWeapon.Value = pendingWeapon;
 
         ApplyTeam(team);
         ApplyClass();
@@ -69,9 +296,17 @@ public class PlayerNetworkSetup : NetworkBehaviour
         ApplyTeam(syncTeam.Value);
         ApplyClass();
 
+        // Footsteps for everyone, driven from replicated movement.
+        if (GetComponent<FootstepAudio>() == null)
+        {
+            gameObject.AddComponent<FootstepAudio>();
+        }
+
         if (IsOwner)
         {
-            MoveOwnerToTeamSpawn();
+            // Remember the team so the spawn selector on the next death knows
+            // which objectives are friendly.
+            ClassSelectHud.LastKnownTeam = syncTeam.Value;
 
             if (remoteBody != null)
             {
@@ -218,6 +453,47 @@ public class PlayerNetworkSetup : NetworkBehaviour
             cloneTransform.position += Vector3.up * sink;
         }
 
+        // Animate the rig: assign the idle/run controller and a driver that
+        // reads the player's actual movement.
+        Animator rigAnimator = clone.GetComponentInChildren<Animator>(true);
+
+        if (rigAnimator == null)
+        {
+            // The dummy rig ships without an Animator; add one on the rig
+            // root (the subtree that owns the bones) with the soldier avatar.
+            SkinnedMeshRenderer rigMesh = clone.GetComponentInChildren<SkinnedMeshRenderer>(true);
+
+            if (rigMesh != null && soldierAvatar != null)
+            {
+                Transform rigRoot = rigMesh.rootBone != null ? rigMesh.rootBone : rigMesh.transform;
+
+                while (rigRoot.parent != null && rigRoot.parent != clone.transform)
+                {
+                    rigRoot = rigRoot.parent;
+                }
+
+                rigAnimator = rigRoot.gameObject.AddComponent<Animator>();
+                rigAnimator.avatar = soldierAvatar;
+            }
+        }
+
+        if (rigAnimator != null && soldierAnimatorController != null)
+        {
+            rigAnimator.runtimeAnimatorController = soldierAnimatorController;
+            rigAnimator.applyRootMotion = false;
+            rigAnimator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+
+            SoldierAnimationDriver driver = clone.AddComponent<SoldierAnimationDriver>();
+            driver.animator = rigAnimator;
+            driver.movementRoot = transform;
+        }
+        else
+        {
+            Debug.LogWarning("[PlayerNetworkSetup] Soldier animation not applied. Animator: "
+                + (rigAnimator != null) + ", controller: " + (soldierAnimatorController != null)
+                + ", avatar: " + (soldierAvatar != null));
+        }
+
         // The rig's hitboxes take over bullet, revive, and zone-trigger
         // duties; hide and disable the capsule.
         MeshRenderer capsuleRenderer = remoteBody.GetComponent<MeshRenderer>();
@@ -290,7 +566,8 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
         if (rifle != null)
         {
-            rifle.SetClassReserveAmmo(definition.reserveAmmo);
+            // Reserve ammo is weapon-defined inside the profile.
+            rifle.ApplyWeaponProfile(WeaponProfiles.Get(syncWeapon.Value));
         }
 
         PlayerController controller = GetComponent<PlayerController>();
@@ -349,6 +626,16 @@ public class PlayerNetworkSetup : NetworkBehaviour
         BoltActionRifle rifle = GetComponent<BoltActionRifle>();
         PlayerTeam team = GetComponent<PlayerTeam>();
         Camera playerCamera = cameraRoot != null ? cameraRoot.GetComponent<Camera>() : null;
+
+        LocalPlayerCamera = playerCamera;
+
+        // Engineers get build controls (keys 4-7).
+        if (PlayerClasses.Get(AssignedClass).buildDigMultiplier > 1f
+            && GetComponent<FortificationBuilder>() == null)
+        {
+            FortificationBuilder builder = gameObject.AddComponent<FortificationBuilder>();
+            builder.playerCamera = playerCamera;
+        }
 
         if (rifle != null)
         {

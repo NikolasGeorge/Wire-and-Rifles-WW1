@@ -504,6 +504,8 @@ MonoBehaviour:
   - {fileID: 7955301654817707168}
   - {fileID: 8411488464799664361}
   remoteBody: {fileID: 696899832386356115}
+  soldierAnimatorController: {fileID: 9100000, guid: a2c86f71e29d9453f6a7b8c9d0e1f2a3, type: 2}
+  soldierAvatar: {fileID: 9000000, guid: 5960adc1c4222ec41a52b6f8746ae867, type: 3}
 --- !u!1 &8598566901067657293
 GameObject:
   m_ObjectHideFlags: 0
