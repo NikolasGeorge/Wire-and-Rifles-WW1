@@ -51,43 +51,6 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!54 &696899832386356201
-Rigidbody:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 696899832386356115}
-  serializedVersion: 4
-  m_Mass: 1
-  m_UseGravity: 0
-  m_IsKinematic: 1
-  m_Interpolate: 0
-  m_Constraints: 0
-  m_CollisionDetection: 0
---- !u!136 &696899832386356200
-CapsuleCollider:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 696899832386356115}
-  m_Material: {fileID: 0}
-  m_IncludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_ExcludeLayers:
-    serializedVersion: 2
-    m_Bits: 0
-  m_LayerOverridePriority: 0
-  m_IsTrigger: 0
-  m_ProvidesContacts: 0
-  m_Enabled: 1
-  serializedVersion: 2
-  m_Radius: 0.5
-  m_Height: 2
-  m_Direction: 1
-  m_Center: {x: 0, y: 0, z: 0}
 --- !u!4 &8379394907852261345
 Transform:
   m_ObjectHideFlags: 0
@@ -160,6 +123,56 @@ MeshRenderer:
   m_SortingOrder: 0
   m_MaskInteraction: 0
   m_AdditionalVertexStreams: {fileID: 0}
+--- !u!136 &696899832386356200
+CapsuleCollider:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 696899832386356115}
+  m_Material: {fileID: 0}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_LayerOverridePriority: 0
+  m_IsTrigger: 0
+  m_ProvidesContacts: 0
+  m_Enabled: 1
+  serializedVersion: 2
+  m_Radius: 0.5
+  m_Height: 2
+  m_Direction: 1
+  m_Center: {x: 0, y: 0, z: 0}
+--- !u!54 &696899832386356201
+Rigidbody:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 696899832386356115}
+  serializedVersion: 5
+  m_Mass: 1
+  m_LinearDamping: 0
+  m_AngularDamping: 0.05
+  m_CenterOfMass: {x: 0, y: 0, z: 0}
+  m_InertiaTensor: {x: 1, y: 1, z: 1}
+  m_InertiaRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_IncludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ExcludeLayers:
+    serializedVersion: 2
+    m_Bits: 0
+  m_ImplicitCom: 1
+  m_ImplicitTensor: 1
+  m_UseGravity: 0
+  m_IsKinematic: 1
+  m_Interpolate: 0
+  m_Constraints: 0
+  m_CollisionDetection: 0
 --- !u!1 &6607405088611053746
 GameObject:
   m_ObjectHideFlags: 0
@@ -191,18 +204,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 3738123646409376959}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &3229520745196109100
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 8587688063911895558}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: c8e42b3dae5f5019b2d3e4f5a6b7c8d9, type: 3}
-  m_Name:
-  m_EditorClassIdentifier: Assembly-CSharp::PlayerNetworkHealth
 --- !u!1 &8587688063911895558
 GameObject:
   m_ObjectHideFlags: 0
@@ -282,14 +283,17 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 80b3ac234ad9cb145bd2f019d91ba13f, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::WW1PlayerController
-  _componentIndexCache: 255
+  _componentIndexCache: 0
   _addedNetworkObject: {fileID: 516998439431662441}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: 516998439431662441}
   playerCamera: {fileID: 8125288734515992192}
-  walkSpeed: 6
-  sprintSpeed: 9
-  jumpHeight: 1
+  walkSpeed: 5
+  sprintSpeed: 8
+  jumpHeight: 0.7
   gravity: -15
+  crouchHeightMultiplier: 0.7
+  crouchSpeedMultiplier: 0.5
+  crouchCameraLerpSpeed: 10
   weaponMoveSpeedMultiplier: 1
   mouseSensitivity: 0.1
   minPitch: -90
@@ -306,9 +310,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1af222c61873b4744b447782ea6040b9, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::BoltActionRifle
-  _componentIndexCache: 255
+  _componentIndexCache: 1
   _addedNetworkObject: {fileID: 516998439431662441}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: 516998439431662441}
   playerCamera: {fileID: 8125288734515992192}
   playerController: {fileID: 7955301654817707168}
   weaponData: {fileID: 11400000, guid: 170edad3970bb0f4787a25010c2f753c, type: 2}
@@ -340,11 +344,23 @@ MonoBehaviour:
   aimMoveSpeed: 10
   aimFovSpeed: 10
   aimAccuracy01: 0
+  fireMode: 0
+  damageMid: -1
+  damageLong: -1
+  closeRangeEnd: 50
+  midRangeEnd: 100
+  pelletsPerShot: 1
+  pelletSpreadAngle: 10
+  shellByShellReload: 0
+  requiresDeploySetup: 0
+  deploySetupTime: 1.5
   headshotDamageMultiplier: 2
   showShotLineInGame: 1
   shotLineDuration: 0.2
   shotLineWidth: 0.015
   shotLineColor: {r: 1, g: 0, b: 0, a: 1}
+  deployedSpreadMultiplier: 0.35
+  deployedRecoilMultiplier: 0.4
 --- !u!114 &95815844070241566
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -411,22 +427,27 @@ MonoBehaviour:
   _spectatorInterpolation: 2
   _enableTeleport: 0
   _teleportThreshold: 1
-  <PrefabId>k__BackingField: 65535
+  <PrefabId>k__BackingField: 0
   <SpawnableCollectionId>k__BackingField: 0
   <AssetPathHash>k__BackingField: 2092870565765373345
   SceneId: 0
   SerializedTransformProperties:
-    Position: {x: 0, y: 0, z: 0}
-    Rotation: {x: 0, y: 0, z: 0, w: 0}
-    Scale: {x: 0, y: 0, z: 0}
-    IsValid: 0
+    Position: {x: 1.536, y: 3.335, z: 1.06747}
+    Rotation: {x: 0, y: 0, z: 0, w: 1}
+    Scale: {x: 1, y: 1, z: 1}
+    IsValid: 1
   <IsNested>k__BackingField: 0
   WasActiveDuringEdit: 0
   WasActiveDuringEdit_Set1: 1
   <ComponentIndex>k__BackingField: 0
   <PredictedSpawn>k__BackingField: {fileID: 0}
   <PredictedOwner>k__BackingField: {fileID: 0}
-  NetworkBehaviours: []
+  NetworkBehaviours:
+  - {fileID: 7955301654817707168}
+  - {fileID: 8411488464799664361}
+  - {fileID: 4409268677856544909}
+  - {fileID: 3229520745196109009}
+  - {fileID: 3229520745196109100}
   InitializedParentNetworkBehaviour: {fileID: 0}
   InitializedNestedNetworkObjects: []
   RuntimeParentNetworkBehaviour: {fileID: 0}
@@ -437,7 +458,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: 0
+  _initializedTimestamp: -8584170088052589413
 --- !u!114 &4409268677856544909
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -450,9 +471,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a2836e36774ca1c4bbbee976e17b649c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: FishNet.Runtime::FishNet.Component.Transforming.NetworkTransform
-  _componentIndexCache: 255
+  _componentIndexCache: 2
   _addedNetworkObject: {fileID: 516998439431662441}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: 516998439431662441}
   _componentConfiguration: 1
   _synchronizeParent: 0
   _packing:
@@ -496,16 +517,67 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: bb7bb0008b76aec47bea5b958ebfed4d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PlayerNetworkSetup
-  _componentIndexCache: 255
+  _componentIndexCache: 3
   _addedNetworkObject: {fileID: 516998439431662441}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: 516998439431662441}
+  alliedBodyColor: {r: 0.25, g: 0.4, b: 0.85, a: 1}
+  centralBodyColor: {r: 0.8, g: 0.25, b: 0.2, a: 1}
+  useSoldierModelFromDummies: 1
+  soldierAnimatorController: {fileID: 9100000, guid: a2c86f71e29d9453f6a7b8c9d0e1f2a3, type: 2}
+  soldierAvatar: {fileID: 9000000, guid: 5960adc1c4222ec41a52b6f8746ae867, type: 3}
+  flareCooldown: 10
+  flareRange: 80
+  spotRadius: 20
+  spotDuration: 8
+  pendingTeam: 0
+  pendingClass: 0
+  pendingWeapon: 0
+  pendingGrenade: 0
+  pendingEquipment1: 0
+  pendingEquipment2: 1
+  grenadesPerLife: 2
+  grenadeDamageRadius: 14
+  grenadeMaxDamage: 90
+  grenadeFlareSpotRadius: 15
   cameraRoot: {fileID: 8598566901067657293}
   ownerOnlyBehaviours:
   - {fileID: 7955301654817707168}
   - {fileID: 8411488464799664361}
   remoteBody: {fileID: 696899832386356115}
-  soldierAnimatorController: {fileID: 9100000, guid: a2c86f71e29d9453f6a7b8c9d0e1f2a3, type: 2}
-  soldierAvatar: {fileID: 9000000, guid: 5960adc1c4222ec41a52b6f8746ae867, type: 3}
+  fireCreepRadius: 4
+  fireCreepDuration: 10
+  fireCreepDamagePerSecond: 10
+  burnDebuffDuration: 5
+--- !u!114 &3229520745196109100
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 8587688063911895558}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c8e42b3dae5f5019b2d3e4f5a6b7c8d9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerNetworkHealth
+  _componentIndexCache: 4
+  _addedNetworkObject: {fileID: 516998439431662441}
+  _networkObjectCache: {fileID: 516998439431662441}
+  maxHealth: 100
+  useDownedState: 1
+  downedHealth: 50
+  bleedOutTime: 30
+  giveUpDelay: 5
+  reviveHealth: 50
+  maxReviveDistance: 4.5
+  respawnDelay: 3
+  spawnProtectionDuration: 4
+  damageFlashColor: {r: 0.8, g: 0.05, b: 0.05, a: 0.4}
+  damageFlashFadeTime: 0.45
+  downedBodyLocalPosition: {x: 0, y: 0.35, z: 0}
+  downedBodyLocalEulerAngles: {x: 90, y: 0, z: 0}
+  downedCameraHeight: 0.5
+  passiveRegenPerSecond: 1
 --- !u!1 &8598566901067657293
 GameObject:
   m_ObjectHideFlags: 0

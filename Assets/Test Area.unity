@@ -3214,6 +3214,7 @@ MonoBehaviour:
   killEndScale: 3
   killFadeOutScale: 10000
   roundDamage: 1
+  damageBufferWindow: 0.05
   normalHitColor: {r: 1, g: 1, b: 1, a: 0.39215687}
   killHitColor: {r: 0.6980392, g: 0.1333333, b: 0.1333333, a: 0.5882353}
 --- !u!114 &532078026
@@ -10999,6 +11000,8 @@ GameObject:
   - component: {fileID: 1900000002}
   - component: {fileID: 1900000003}
   - component: {fileID: 1900000004}
+  - component: {fileID: 1900000005}
+  - component: {fileID: 1900000006}
   m_Layer: 0
   m_Name: ClassSpawnManager
   m_TagString: Untagged
@@ -11094,6 +11097,56 @@ MonoBehaviour:
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
   _initializedTimestamp: 0
+--- !u!114 &1900000005
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1900000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e6ac0db5c63bd897d0e1f2a3b4c5d6e7, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::FortificationManager
+  _componentIndexCache: 255
+  _addedNetworkObject: {fileID: 1900000004}
+  _networkObjectCache: {fileID: 0}
+  maxPlaceDistance: 6
+  maxGroundAngle: 30
+  maxSameTypeStack: 2
+  stackCheckRadius: 1.5
+  startingSupplies: 60
+  suppliesPerTick: 5
+  supplyTickInterval: 30
+  suppliesCap: 300
+  buildInteractRange: 4.5
+  wireDamagePerSecond: 15
+  crateEffectRadius: 3.5
+  crateEffectInterval: 2
+  ammoPerTick: 5
+  healPerTick: 10
+--- !u!114 &1900000006
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1900000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f3bd7ec2d3acdef4e7f8a9b0c1d2e3f4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::TerrainDigManager
+  _componentIndexCache: 255
+  _addedNetworkObject: {fileID: 1900000004}
+  _networkObjectCache: {fileID: 0}
+  maxDigDepth: 0.9
+  digRadius: 1.5
+  depthPerScoop: 0.15
+  maxDigDistance: 4
+  structureClearance: 2
+  scoopInterval: 0.5
 --- !u!114 &1900000010
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -11106,6 +11159,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e0a64d5fc07b7231d4f5a6b7c8d9eafb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ClassSelectHud
+  minCameraHeight: 60
+  maxCameraHeight: 220
 --- !u!1001 &1904239749
 PrefabInstance:
   m_ObjectHideFlags: 0

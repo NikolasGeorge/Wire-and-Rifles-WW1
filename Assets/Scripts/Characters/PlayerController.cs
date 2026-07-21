@@ -9,10 +9,17 @@ public class PlayerController : NetworkBehaviour
     public Camera playerCamera;
 
     [Header("Movement")]
-    public float walkSpeed = 4.5f;
-    public float sprintSpeed = 6.5f;
-    public float jumpHeight = 1.1f;
+    public float walkSpeed = 3.15f;
+    public float sprintSpeed = 4.55f;
+    public float jumpHeight = 0.77f;
     public float gravity = -20f;
+
+    [Header("Crouch")]
+    [Range(0.3f, 0.9f)]
+    public float crouchHeightMultiplier = 0.75f;
+    [Range(0.1f, 1f)]
+    public float crouchSpeedMultiplier = 0.5f;
+    public float crouchCameraLerpSpeed = 10f;
 
     [Header("Weapon Movement")]
     public float weaponMoveSpeedMultiplier = 1f;
@@ -32,12 +39,22 @@ public class PlayerController : NetworkBehaviour
     private bool isSprinting;
     private float lastSprintEndTime = -999f;
 
+    private bool isCrouching;
+    private float standHeight;
+    private Vector3 standCenter;
+    private float standCameraLocalY;
+    private bool crouchCached;
+
+    public bool IsCrouching => isCrouching;
+
     public bool IsMoving => isMoving;
     public bool IsSprinting => isSprinting;
     public bool IsGrounded => characterController != null && characterController.isGrounded;
     public float LastSprintEndTime => lastSprintEndTime;
     public Vector2 CurrentMoveInput => currentMoveInput;
-    public bool SprintInputHeld => Keyboard.current != null && (Keyboard.current.leftShiftKey.isPressed || Keyboard.current.rightShiftKey.isPressed);
+    private bool sprintToggled;
+
+    public bool SprintInputHeld => GameSettings.ToggleSprint ? sprintToggled : GameSettings.Held(GameAction.Sprint);
 
     private void Awake()
     {
@@ -71,9 +88,15 @@ public class PlayerController : NetworkBehaviour
             return;
         }
 
-        HandleLook();
+        // Pause menu owns the cursor and look while open; movement continues
+        // (the game does not stop in multiplayer).
+        if (!PauseMenu.IsOpen)
+        {
+            HandleLook();
+            HandleCursor();
+        }
+
         HandleMovement();
-        HandleCursor();
     }
 
     private void HandleLook()
@@ -102,20 +125,43 @@ public class PlayerController : NetworkBehaviour
 
         Vector2 moveInput = Vector2.zero;
 
-        if (Keyboard.current.wKey.isPressed) moveInput.y += 1f;
-        if (Keyboard.current.sKey.isPressed) moveInput.y -= 1f;
-        if (Keyboard.current.dKey.isPressed) moveInput.x += 1f;
-        if (Keyboard.current.aKey.isPressed) moveInput.x -= 1f;
+        if (GameSettings.Held(GameAction.MoveForward)) moveInput.y += 1f;
+        if (GameSettings.Held(GameAction.MoveBackward)) moveInput.y -= 1f;
+        if (GameSettings.Held(GameAction.MoveRight)) moveInput.x += 1f;
+        if (GameSettings.Held(GameAction.MoveLeft)) moveInput.x -= 1f;
 
         moveInput = Vector2.ClampMagnitude(moveInput, 1f);
 
         currentMoveInput = moveInput;
         isMoving = currentMoveInput.sqrMagnitude > 0.01f;
 
-        bool wasSprinting = isSprinting;
-        bool sprintInputHeld = Keyboard.current.leftShiftKey.isPressed || Keyboard.current.rightShiftKey.isPressed;
+        HandleCrouch(grounded);
 
-        isSprinting = sprintInputHeld && isMoving;
+        bool wasSprinting = isSprinting;
+        bool sprintInputHeld;
+
+        if (GameSettings.ToggleSprint)
+        {
+            // Tap to latch sprint; it drops when you stop moving or crouch.
+            if (GameSettings.Pressed(GameAction.Sprint))
+            {
+                sprintToggled = !sprintToggled;
+            }
+
+            if (!isMoving || isCrouching)
+            {
+                sprintToggled = false;
+            }
+
+            sprintInputHeld = sprintToggled;
+        }
+        else
+        {
+            sprintToggled = false;
+            sprintInputHeld = GameSettings.Held(GameAction.Sprint);
+        }
+
+        isSprinting = sprintInputHeld && isMoving && !isCrouching;
 
         if (wasSprinting && !isSprinting)
         {
@@ -124,6 +170,11 @@ public class PlayerController : NetworkBehaviour
 
         float currentSpeed = isSprinting ? sprintSpeed : walkSpeed;
         currentSpeed *= Mathf.Max(0f, weaponMoveSpeedMultiplier);
+
+        if (isCrouching)
+        {
+            currentSpeed *= crouchSpeedMultiplier;
+        }
 
         // Environmental slow (barbed wire). Re-applied every frame the player
         // stays inside a zone; expires on its own shortly after leaving.
@@ -134,7 +185,7 @@ public class PlayerController : NetworkBehaviour
 
         Vector3 moveDirection = transform.right * moveInput.x + transform.forward * moveInput.y;
 
-        if (grounded && Keyboard.current.spaceKey.wasPressedThisFrame)
+        if (grounded && !isCrouching && GameSettings.Pressed(GameAction.Jump))
         {
             verticalVelocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
         }
@@ -145,6 +196,61 @@ public class PlayerController : NetworkBehaviour
         finalMovement.y = verticalVelocity.y;
 
         characterController.Move(finalMovement * Time.deltaTime);
+    }
+
+    // Hold Ctrl to crouch: shorter capsule, lower camera, slower movement,
+    // no sprint or jump. Standing back up requires headroom.
+    private void HandleCrouch(bool grounded)
+    {
+        if (!crouchCached)
+        {
+            crouchCached = true;
+            standHeight = characterController.height;
+            standCenter = characterController.center;
+
+            if (playerCamera != null)
+            {
+                standCameraLocalY = playerCamera.transform.localPosition.y;
+            }
+        }
+
+        bool wantsCrouch = GameSettings.Held(GameAction.Crouch);
+
+        if (wantsCrouch && !isCrouching)
+        {
+            isCrouching = true;
+
+            float crouchHeight = standHeight * crouchHeightMultiplier;
+            characterController.height = crouchHeight;
+            characterController.center = standCenter - Vector3.up * (standHeight - crouchHeight) * 0.5f;
+        }
+        else if (!wantsCrouch && isCrouching && HasHeadroomToStand())
+        {
+            isCrouching = false;
+            characterController.height = standHeight;
+            characterController.center = standCenter;
+        }
+
+        if (playerCamera != null)
+        {
+            float targetY = isCrouching
+                ? standCameraLocalY - standHeight * (1f - crouchHeightMultiplier)
+                : standCameraLocalY;
+
+            Vector3 cameraLocal = playerCamera.transform.localPosition;
+            cameraLocal.y = Mathf.Lerp(cameraLocal.y, targetY, Time.deltaTime * crouchCameraLerpSpeed);
+            playerCamera.transform.localPosition = cameraLocal;
+        }
+    }
+
+    private bool HasHeadroomToStand()
+    {
+        float crouchHeight = characterController.height;
+        Vector3 castStart = transform.position + characterController.center + Vector3.up * (crouchHeight * 0.5f - characterController.radius);
+        float castDistance = (standHeight - crouchHeight) + 0.05f;
+
+        return !Physics.SphereCast(castStart, characterController.radius * 0.9f, Vector3.up, out _,
+            castDistance, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
     }
 
     public void SetWeaponMoveSpeedMultiplier(float multiplier)

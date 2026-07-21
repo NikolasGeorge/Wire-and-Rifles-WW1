@@ -119,13 +119,13 @@ public static class PlayerClasses
         new PlayerClassDefinition
         {
             displayName = "Engineer",
-            description = "Builds and digs fortifications faster.",
+            description = "Places blueprints and builds at 2x speed.",
             maxHealth = 100f,
             reserveAmmo = 300,
             moveSpeedMultiplier = 1f,
             canRevive = false,
             canSpot = false,
-            buildDigMultiplier = 1.5f,
+            buildDigMultiplier = 2f,
             weapon = "Bolt-Action Rifle",
             weaponOptions = new[] { WeaponId.BoltAction },
             grenade = "Incendiary Grenade",

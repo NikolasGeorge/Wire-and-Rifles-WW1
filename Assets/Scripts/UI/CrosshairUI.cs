@@ -49,7 +49,9 @@ public class CrosshairUI : MonoBehaviour
             return;
         }
 
-        if (hideCrosshairWhileAiming && rifle.isAiming)
+        // Always hidden while aiming down sights, regardless of the
+        // Inspector toggle — iron sights are the aiming reference.
+        if (rifle.isAiming)
         {
             SetLineVisibility(false);
             SetCenterObjectsVisible(false, false);
