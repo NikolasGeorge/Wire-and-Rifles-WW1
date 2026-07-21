@@ -173,7 +173,7 @@ public static class WeaponProfiles
                     hipFieldOfView = 80f,
                     aimFieldOfView = 60f,
                     pelletsPerShot = 15,
-                    pelletSpreadAngle = 10f,
+                    pelletSpreadAngle = 5f,
                     useRapidFirePenalty = false,
                     hipRecoilMultiplier = 1f,
                     aimRecoilMultiplier = 0.9f,
@@ -184,7 +184,7 @@ public static class WeaponProfiles
             case WeaponId.Lmg:
                 return new WeaponProfile
                 {
-                    displayName = "LMG (must deploy)",
+                    displayName = "LMG",
                     fireMode = WeaponFireMode.Automatic,
                     // 2-shot down close, 3-shot mid, 4-shot long.
                     damageClose = 50f,
@@ -194,15 +194,17 @@ public static class WeaponProfiles
                     midRangeEnd = 100f,
                     range = 120f,
                     muzzleVelocity = 650f,
-                    clipSize = 30,
-                    reserveAmmo = 90,
+                    clipSize = 50,
+                    reserveAmmo = 100,
                     fireInterval = 0.12f,
                     reloadTime = 5f,
-                    baseInaccuracyAngle = 1.2f,
-                    movingInaccuracyPenalty = 3f,
-                    airborneInaccuracyPenalty = 6f,
-                    aimingInaccuracyMultiplier = 0.4f,
-                    aimAccuracyBuildTime = 0.25f,
+                    // Fires undeployed with heavy recoil and wide spread;
+                    // deploying (hold aim while still) shrinks both.
+                    baseInaccuracyAngle = 2.2f,
+                    movingInaccuracyPenalty = 4f,
+                    airborneInaccuracyPenalty = 8f,
+                    aimingInaccuracyMultiplier = 0.5f,
+                    aimAccuracyBuildTime = 0.35f,
                     aimMoveSpeedMultiplier = 0.55f,
                     hipFieldOfView = 80f,
                     aimFieldOfView = 55f,
@@ -210,9 +212,9 @@ public static class WeaponProfiles
                     requiresDeploySetup = true,
                     deploySetupTime = 1.5f,
                     useRapidFirePenalty = false,
-                    hipRecoilMultiplier = 1f,
-                    aimRecoilMultiplier = 0.5f,
-                    cameraPitchKick = 1.5f,
+                    hipRecoilMultiplier = 1.6f,
+                    aimRecoilMultiplier = 1f,
+                    cameraPitchKick = 2.4f,
                     cameraYawRandom = 0.4f
                 };
 

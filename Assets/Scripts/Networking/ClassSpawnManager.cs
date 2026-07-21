@@ -39,7 +39,9 @@ public class ClassSpawnManager : NetworkBehaviour
     // spawnObjectiveIndex: -1 spawns at the team base; otherwise an index
     // into GetZonesSortedByLetter(), valid only while that team owns the zone.
     [ServerRpc(RequireOwnership = false)]
-    public void RequestSpawn(Team requestedTeam, PlayerClass playerClass, int weaponIndex, int spawnObjectiveIndex, NetworkConnection sender = null)
+    public void RequestSpawn(Team requestedTeam, PlayerClass playerClass, int weaponIndex,
+        GrenadeType grenade, EquipmentType equipment1, EquipmentType equipment2,
+        int spawnObjectiveIndex, NetworkConnection sender = null)
     {
         if (sender == null || playerPrefab == null)
         {
@@ -108,6 +110,20 @@ public class ClassSpawnManager : NetworkBehaviour
                 ? Mathf.Clamp(weaponIndex, 0, options.Length - 1)
                 : -1;
             setup.pendingWeapon = clampedIndex >= 0 ? options[clampedIndex] : WeaponId.BoltAction;
+
+            // Grenade/equipment: forced to the class kit unless the class has
+            // a customizable loadout (Assault), whose picks are pool-checked.
+            LoadoutSelection sanitized = LoadoutData.Sanitize(playerClass, new LoadoutSelection
+            {
+                weaponIndex = clampedIndex,
+                grenade = grenade,
+                equipment1 = equipment1,
+                equipment2 = equipment2
+            });
+
+            setup.pendingGrenade = sanitized.grenade;
+            setup.pendingEquipment1 = sanitized.equipment1;
+            setup.pendingEquipment2 = sanitized.equipment2;
         }
 
         ServerManager.Spawn(instance, sender);

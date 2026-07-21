@@ -35,6 +35,8 @@ public class BoltActionRifle : NetworkBehaviour
 
     [Header("Aiming Down Sights")]
     public bool isAiming;
+    // Latch for toggle-ADS gameplay option (see GameSettings.ToggleAds).
+    private bool adsToggleState;
     public bool canAimDuringSprintLockout;
     public Vector3 aimWeaponLocalPosition = new Vector3(0f, -0.08f, 0.25f);
     public Vector3 aimWeaponLocalRotation = Vector3.zero;
@@ -98,6 +100,13 @@ public class BoltActionRifle : NetworkBehaviour
     private float lastDeployBlockedFireTime = -999f;
 
     public bool IsDeployed => !requiresDeploySetup || deployTimer >= deploySetupTime;
+
+    // Deploy is an incentive, not a gate: the weapon always fires, but a
+    // completed deploy shrinks spread and recoil to these fractions.
+    public float deployedSpreadMultiplier = 0.35f;
+    public float deployedRecoilMultiplier = 0.4f;
+
+    private bool DeployBonusActive => requiresDeploySetup && deployTimer >= deploySetupTime;
 
     // Replaces the shared WeaponData with a per-instance copy carrying this
     // class's primary stats. Runs on every instance (server and clients) from
@@ -189,9 +198,12 @@ public class BoltActionRifle : NetworkBehaviour
         reserveAmmo = newReserve;
     }
 
+    // Players spawn with the profile's full reserve, but the CAP is 150% of
+    // it — Support's ammo crate can overfill everyone half again beyond a
+    // fresh spawn.
     public void SetClassReserveAmmo(int reserve)
     {
-        classReserveAmmoOverride = reserve;
+        classReserveAmmoOverride = reserve * 3 / 2;
         reserveAmmo = reserve;
 
         if (IsServerInitialized)
@@ -276,6 +288,11 @@ public class BoltActionRifle : NetworkBehaviour
                 inaccuracy *= 1f + rapidFireCurrentPenaltyPercent;
             }
 
+            if (DeployBonusActive)
+            {
+                inaccuracy *= deployedSpreadMultiplier;
+            }
+
             return inaccuracy;
         }
     }
@@ -349,6 +366,24 @@ public class BoltActionRifle : NetworkBehaviour
         }
     }
 
+    // Called when the item-slot system switches away from the rifle, so ADS
+    // zoom and the aim move-speed penalty never stay stuck.
+    public void ForceStopAiming()
+    {
+        isAiming = false;
+        adsToggleState = false;
+
+        if (playerCamera != null)
+        {
+            playerCamera.fieldOfView = hipFieldOfView;
+        }
+
+        if (playerController != null)
+        {
+            playerController.SetWeaponMoveSpeedMultiplier(1f);
+        }
+    }
+
     public override void OnStartServer()
     {
         base.OnStartServer();
@@ -369,6 +404,7 @@ public class BoltActionRifle : NetworkBehaviour
 
         UpdateRapidFirePenaltyReset();
         UpdateAiming();
+        HandleAimPoseTuning();
         UpdateWeaponSprintPose();
 
         // LMG setup: deploying means holding aim in place for the setup time.
@@ -383,6 +419,11 @@ public class BoltActionRifle : NetworkBehaviour
             return;
         }
 
+        if (PauseMenu.IsOpen)
+        {
+            return;
+        }
+
         bool firePressed = fireMode == WeaponFireMode.Automatic
             ? Mouse.current.leftButton.isPressed
             : Mouse.current.leftButton.wasPressedThisFrame;
@@ -392,7 +433,7 @@ public class BoltActionRifle : NetworkBehaviour
             TryFire();
         }
 
-        if (Keyboard.current.rKey.wasPressedThisFrame)
+        if (GameSettings.Pressed(GameAction.Reload))
         {
             TryReload();
         }
@@ -425,10 +466,34 @@ public class BoltActionRifle : NetworkBehaviour
             return;
         }
 
-        bool aimInputHeld = Mouse.current.rightButton.isPressed;
+        bool aimInputActive;
+
+        if (GameSettings.ToggleAds)
+        {
+            // Right-click flips ADS on/off and holds it.
+            if (Mouse.current.rightButton.wasPressedThisFrame)
+            {
+                adsToggleState = !adsToggleState;
+            }
+
+            aimInputActive = adsToggleState;
+        }
+        else
+        {
+            adsToggleState = false;
+            aimInputActive = Mouse.current.rightButton.isPressed;
+        }
+
         bool blockedBySprint = IsSprintFireLocked && !canAimDuringSprintLockout;
 
-        isAiming = aimInputHeld && !blockedBySprint && !isReloading;
+        isAiming = aimInputActive && !blockedBySprint && !isReloading;
+
+        // Keep the toggle latch in sync when aiming is force-broken, so the
+        // next right-click always turns ADS on rather than off.
+        if (!isAiming)
+        {
+            adsToggleState = false;
+        }
 
         bool groundedForAimBonus = playerController == null || playerController.IsGrounded;
         bool shouldApplyAimAccuracy = isAiming && groundedForAimBonus;
@@ -549,12 +614,6 @@ public class BoltActionRifle : NetworkBehaviour
             return;
         }
 
-        if (!IsDeployed)
-        {
-            lastDeployBlockedFireTime = Time.time;
-            return;
-        }
-
         if (currentAmmo <= 0)
         {
             Debug.Log("Empty. Press R to reload.");
@@ -588,6 +647,12 @@ public class BoltActionRifle : NetworkBehaviour
         if (weaponRecoil != null)
         {
             float recoilMultiplier = weaponRecoil.GetRecoilMultiplier(isAiming);
+
+            if (DeployBonusActive)
+            {
+                recoilMultiplier *= deployedRecoilMultiplier;
+            }
+
             weaponRecoil.ApplyRecoil(recoilMultiplier);
         }
 
@@ -769,6 +834,22 @@ public class BoltActionRifle : NetworkBehaviour
         {
             // Networked target: the server applies damage and sends the hit
             // marker back via TargetRpc.
+            yield break;
+        }
+
+        // Player-built structures: report damage to the server (blueprints
+        // are ignored server-side; friendly fire on structures is blocked).
+        FortificationStructure fortification = hit.collider.GetComponentInParent<FortificationStructure>();
+
+        if (fortification != null)
+        {
+            if (FortificationManager.Instance != null)
+            {
+                float structureShotDistance = Vector3.Distance(shotStartPoint, shotEndPoint);
+                FortificationManager.Instance.ReportStructureDamage(
+                    fortification.id, GetBaseDamageAtDistance(structureShotDistance, false));
+            }
+
             yield break;
         }
 
@@ -1327,8 +1408,77 @@ public class BoltActionRifle : NetworkBehaviour
         AudioSource.PlayClipAtPoint(weaponData.boltCycleSound, transform.position + Vector3.up * 1.5f, weaponData.boltCycleSoundVolume);
     }
 
+    // ---- Sight alignment tuning (editor helper) ----
+    // Hold LEFT ALT while aiming: arrows move the weapon (up/down = height,
+    // left/right = sideways), [ ] = closer/further, - = shrink, = = grow.
+    // The on-screen readout shows the values to copy into the WeaponVisuals
+    // asset (aim position + model scale).
+    private bool aimTuningUsed;
+
+    private void HandleAimPoseTuning()
+    {
+        if (!isAiming || Keyboard.current == null || !Keyboard.current.leftAltKey.isPressed)
+        {
+            return;
+        }
+
+        float moveStep = 0.05f * Time.deltaTime;
+        float scaleStep = 0.3f * Time.deltaTime;
+        Vector3 delta = Vector3.zero;
+        float scaleDelta = 0f;
+
+        if (Keyboard.current.upArrowKey.isPressed) delta.y += moveStep;
+        if (Keyboard.current.downArrowKey.isPressed) delta.y -= moveStep;
+        if (Keyboard.current.rightArrowKey.isPressed) delta.x += moveStep;
+        if (Keyboard.current.leftArrowKey.isPressed) delta.x -= moveStep;
+        if (Keyboard.current.rightBracketKey.isPressed) delta.z += moveStep;
+        if (Keyboard.current.leftBracketKey.isPressed) delta.z -= moveStep;
+        if (Keyboard.current.equalsKey.isPressed) scaleDelta += scaleStep;
+        if (Keyboard.current.minusKey.isPressed) scaleDelta -= scaleStep;
+
+        if (delta == Vector3.zero && scaleDelta == 0f)
+        {
+            return;
+        }
+
+        aimTuningUsed = true;
+        aimWeaponLocalPosition += delta;
+
+        if (scaleDelta != 0f && weaponHolder != null)
+        {
+            Transform model = weaponHolder.Find("WeaponViewModel");
+
+            if (model != null)
+            {
+                float scale = Mathf.Max(0.05f, model.localScale.x + scaleDelta);
+                model.localScale = Vector3.one * scale;
+            }
+        }
+    }
+
     private void OnGUI()
     {
+        if (IsOwner && aimTuningUsed && Keyboard.current != null && Keyboard.current.leftAltKey.isPressed)
+        {
+            string scaleText = "";
+
+            if (weaponHolder != null)
+            {
+                Transform model = weaponHolder.Find("WeaponViewModel");
+
+                if (model != null)
+                {
+                    scaleText = "   Model Scale: " + model.localScale.x.ToString("0.00");
+                }
+            }
+
+            GUI.Label(new Rect(10f, Screen.height - 60f, 900f, 25f),
+                "AIM TUNE  Position: (" + aimWeaponLocalPosition.x.ToString("0.000") + ", "
+                + aimWeaponLocalPosition.y.ToString("0.000") + ", "
+                + aimWeaponLocalPosition.z.ToString("0.000") + ")" + scaleText
+                + "   → copy into WeaponVisuals asset");
+        }
+
         if (!IsOwner || !requiresDeploySetup)
         {
             return;
@@ -1338,11 +1488,11 @@ public class BoltActionRifle : NetworkBehaviour
 
         if (isAiming && !IsDeployed)
         {
-            message = "SETTING UP... " + Mathf.CeilToInt((deploySetupTime - deployTimer) * 10f) / 10f + "s";
+            message = "DEPLOYING... " + Mathf.CeilToInt((deploySetupTime - deployTimer) * 10f) / 10f + "s";
         }
-        else if (!isAiming && Time.time - lastDeployBlockedFireTime < 1.5f)
+        else if (isAiming && DeployBonusActive)
         {
-            message = "HOLD AIM WHILE STANDING STILL TO DEPLOY";
+            message = "DEPLOYED";
         }
 
         if (message == null)

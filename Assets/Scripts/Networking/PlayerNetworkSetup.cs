@@ -53,6 +53,36 @@ public class PlayerNetworkSetup : NetworkBehaviour
     [HideInInspector] public Team pendingTeam = Team.Neutral;
     [HideInInspector] public PlayerClass pendingClass = PlayerClass.Assault;
     [HideInInspector] public WeaponId pendingWeapon = WeaponId.BoltAction;
+    [HideInInspector] public GrenadeType pendingGrenade = GrenadeType.Frag;
+    [HideInInspector] public EquipmentType pendingEquipment1 = EquipmentType.AmmoPouch;
+    [HideInInspector] public EquipmentType pendingEquipment2 = EquipmentType.Bandages;
+
+    // Replicated loadout (grenade/equipment systems read these when built).
+    private readonly SyncVar<GrenadeType> syncGrenade = new SyncVar<GrenadeType>();
+    private readonly SyncVar<EquipmentType> syncEquipment1 = new SyncVar<EquipmentType>();
+    private readonly SyncVar<EquipmentType> syncEquipment2 = new SyncVar<EquipmentType>();
+
+    public GrenadeType AssignedGrenade => syncGrenade.Value;
+    public EquipmentType AssignedEquipment1 => syncEquipment1.Value;
+    public EquipmentType AssignedEquipment2 => syncEquipment2.Value;
+
+    private readonly SyncVar<int> syncGrenadesLeft = new SyncVar<int>();
+    public int GrenadesLeft => syncGrenadesLeft.Value;
+
+    // Ammo crates restock grenades one at a time up to the per-life cap.
+    public void ServerRestockGrenade()
+    {
+        if (syncGrenadesLeft.Value < grenadesPerLife)
+        {
+            syncGrenadesLeft.Value++;
+        }
+    }
+
+    [Header("Grenades")]
+    public int grenadesPerLife = 2;
+    public float grenadeDamageRadius = 14f;
+    public float grenadeMaxDamage = 90f;
+    public float grenadeFlareSpotRadius = 15f;
 
     private bool classApplied;
 
@@ -154,6 +184,283 @@ public class PlayerNetworkSetup : NetworkBehaviour
                 target.ServerApplySpotted(AssignedTeam);
             }
         }
+    }
+
+    // ---- Grenades (slot 2) ----
+    // The owner throws; the server validates, simulates the same
+    // deterministic arc every client renders, then explodes: damage +
+    // terrain crater for frag-likes, smoke cloud for smoke, area spot for
+    // flare.
+
+    [ServerRpc]
+    public void RequestThrowGrenade(Vector3 origin, Vector3 velocity)
+    {
+        PlayerNetworkHealth health = GetComponent<PlayerNetworkHealth>();
+
+        if (health != null && health.State != PlayerLifeState.Alive)
+        {
+            return;
+        }
+
+        if (syncGrenadesLeft.Value <= 0)
+        {
+            return;
+        }
+
+        if (Vector3.Distance(origin, transform.position) > 4f)
+        {
+            return;
+        }
+
+        velocity = Vector3.ClampMagnitude(velocity, 20f);
+        syncGrenadesLeft.Value--;
+
+        ObserversSpawnGrenade(origin, velocity);
+        StartCoroutine(ServerGrenadeFuse(origin, velocity, AssignedGrenade, AssignedTeam));
+    }
+
+    [ObserversRpc]
+    private void ObserversSpawnGrenade(Vector3 origin, Vector3 velocity)
+    {
+        GrenadeVisual.Spawn(origin, velocity, false, AssignedGrenade);
+    }
+
+    // Real frame time for BOTH stepping and the fuse clock, matching the
+    // client visual exactly — a fixed 0.02 step per frame ran the fuse at
+    // several times real speed on fast machines, detonating mid-flight.
+    private System.Collections.IEnumerator ServerGrenadeFuse(Vector3 position, Vector3 velocity,
+        GrenadeType grenadeType, Team throwerTeam)
+    {
+        float elapsed = 0f;
+        bool resting = false;
+
+        while (elapsed < GrenadeArc.FuseSeconds)
+        {
+            float deltaTime = Mathf.Min(Time.deltaTime, 0.05f);
+
+            if (!resting)
+            {
+                resting = GrenadeArc.Step(ref position, ref velocity, deltaTime);
+            }
+
+            elapsed += deltaTime;
+            yield return null;
+        }
+
+        ServerExplode(position, grenadeType, throwerTeam);
+    }
+
+    private void ServerExplode(Vector3 position, GrenadeType grenadeType, Team throwerTeam)
+    {
+        bool smoke = grenadeType == GrenadeType.Smoke;
+        ObserversExplosionFx(position, smoke);
+
+        if (smoke)
+        {
+            return;
+        }
+
+        if (grenadeType == GrenadeType.Flare)
+        {
+            // Area spot instead of damage.
+            foreach (PlayerNetworkSetup target in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+            {
+                if (target.AssignedTeam != throwerTeam && target.AssignedTeam != Team.Neutral
+                    && Vector3.Distance(target.transform.position, position) <= grenadeFlareSpotRadius)
+                {
+                    target.ServerApplySpotted(throwerTeam);
+                }
+            }
+
+            return;
+        }
+
+        // Frag / Stick / Incendiary: radial damage with linear falloff.
+        // Teammates are spared — but the thrower is NOT: your own grenade at
+        // your feet hurts you. Stick trades power for coverage: double the
+        // area (radius x1.41) at reduced damage.
+        float radius = grenadeDamageRadius;
+        float maxDamage = grenadeMaxDamage;
+
+        if (grenadeType == GrenadeType.Stick)
+        {
+            radius *= 1.41f;
+            maxDamage *= 0.6f;
+        }
+
+        // Incendiary's threat is the lingering fire, not the blast.
+        if (grenadeType == GrenadeType.Incendiary)
+        {
+            maxDamage *= 0.2f;
+        }
+
+        foreach (PlayerNetworkHealth target in FindObjectsByType<PlayerNetworkHealth>(FindObjectsSortMode.None))
+        {
+            PlayerNetworkSetup targetSetup = target.GetComponent<PlayerNetworkSetup>();
+
+            if (targetSetup == null || (targetSetup.AssignedTeam == throwerTeam && targetSetup != this))
+            {
+                continue;
+            }
+
+            float distance = Vector3.Distance(target.transform.position, position);
+
+            if (distance <= radius)
+            {
+                float damage = maxDamage * (1f - distance / radius);
+                target.ServerTakeDamage(damage);
+            }
+        }
+
+        if (TerrainDigManager.Instance != null)
+        {
+            TerrainDigManager.Instance.ServerAddCrater(position);
+        }
+
+        // Incendiary leaves a burning patch: contact damage plus a burn
+        // debuff that halves all healing.
+        if (grenadeType == GrenadeType.Incendiary)
+        {
+            StartCoroutine(ServerFireCreep(position, throwerTeam));
+            ObserversFireFx(position, fireCreepRadius, fireCreepDuration);
+        }
+    }
+
+    [Header("Incendiary Fire Creep")]
+    public float fireCreepRadius = 4f;
+    public float fireCreepDuration = 10f;
+    public float fireCreepDamagePerSecond = 10f;
+    public float burnDebuffDuration = 5f;
+
+    private System.Collections.IEnumerator ServerFireCreep(Vector3 position, Team throwerTeam)
+    {
+        float elapsed = 0f;
+        const float tick = 0.5f;
+        float tickTimer = 0f;
+
+        while (elapsed < fireCreepDuration)
+        {
+            elapsed += Time.deltaTime;
+            tickTimer += Time.deltaTime;
+
+            if (tickTimer >= tick)
+            {
+                tickTimer = 0f;
+
+                foreach (PlayerNetworkHealth target in FindObjectsByType<PlayerNetworkHealth>(FindObjectsSortMode.None))
+                {
+                    PlayerNetworkSetup targetSetup = target.GetComponent<PlayerNetworkSetup>();
+
+                    if (targetSetup == null || (targetSetup.AssignedTeam == throwerTeam && targetSetup != this))
+                    {
+                        continue;
+                    }
+
+                    Vector3 flat = target.transform.position - position;
+                    flat.y = 0f;
+
+                    // Touching the fire ignites you: the DOT (and halved
+                    // healing) lingers for the full burn duration after you
+                    // leave, refreshed while you stay inside.
+                    if (flat.magnitude <= fireCreepRadius)
+                    {
+                        target.ServerIgnite(fireCreepDamagePerSecond, burnDebuffDuration);
+                    }
+                }
+            }
+
+            yield return null;
+        }
+    }
+
+    [ObserversRpc]
+    private void ObserversFireFx(Vector3 position, float radius, float duration)
+    {
+        FireCreepFx.Spawn(position, radius, duration);
+    }
+
+    [ObserversRpc]
+    private void ObserversExplosionFx(Vector3 position, bool smoke)
+    {
+        ExplosionFx.Spawn(position, smoke);
+    }
+
+    // ---- Throwable supply crates (gadget slots) ----
+    // Support's ammo crate and Medic's med kit are thrown like a grenade;
+    // where the box lands, a completed AOE crate structure appears (replacing
+    // that player's previous one).
+
+    private float serverNextCrateThrowTime;
+
+    [ServerRpc]
+    public void RequestThrowSupplyCrate(Vector3 origin, Vector3 velocity, bool ammo)
+    {
+        PlayerNetworkHealth health = GetComponent<PlayerNetworkHealth>();
+
+        if (health != null && health.State != PlayerLifeState.Alive)
+        {
+            return;
+        }
+
+        // Only a player actually carrying that equipment can throw it.
+        EquipmentType required = ammo ? EquipmentType.AmmoCrate : EquipmentType.MedicalKit;
+
+        if (AssignedEquipment1 != required && AssignedEquipment2 != required)
+        {
+            return;
+        }
+
+        if (Time.time < serverNextCrateThrowTime || Vector3.Distance(origin, transform.position) > 4f)
+        {
+            return;
+        }
+
+        serverNextCrateThrowTime = Time.time + 5f;
+        velocity = Vector3.ClampMagnitude(velocity, 16f);
+
+        ObserversSpawnCrateVisual(origin, velocity);
+        StartCoroutine(ServerCrateLanding(origin, velocity, ammo));
+    }
+
+    [ObserversRpc]
+    private void ObserversSpawnCrateVisual(Vector3 origin, Vector3 velocity)
+    {
+        GrenadeVisual.Spawn(origin, velocity, true);
+    }
+
+    private System.Collections.IEnumerator ServerCrateLanding(Vector3 position, Vector3 velocity, bool ammo)
+    {
+        FortificationManager manager = FortificationManager.Instance;
+
+        if (manager == null)
+        {
+            yield break;
+        }
+
+        // The crate starts dispensing the moment it leaves your hand; its
+        // AOE follows the flying box.
+        int crateId = manager.ServerCreateThrownCrate(
+            ammo ? FortificationType.AmmoCrate : FortificationType.MedCrate,
+            position, AssignedTeam, OwnerId);
+
+        if (crateId < 0)
+        {
+            yield break;
+        }
+
+        float elapsed = 0f;
+        bool resting = false;
+
+        while (!resting && elapsed < 4f)
+        {
+            float deltaTime = Mathf.Min(Time.deltaTime, 0.05f);
+            resting = GrenadeArc.Step(ref position, ref velocity, deltaTime, false);
+            elapsed += deltaTime;
+            manager.ServerMoveThrownCrate(crateId, position);
+            yield return null;
+        }
+
+        manager.ServerFinalizeThrownCrate(crateId, position);
     }
 
     // Server: mark this player as spotted for the given team.
@@ -284,6 +591,10 @@ public class PlayerNetworkSetup : NetworkBehaviour
         syncTeam.Value = team;
         syncClass.Value = pendingClass;
         syncWeapon.Value = pendingWeapon;
+        syncGrenade.Value = pendingGrenade;
+        syncEquipment1.Value = pendingEquipment1;
+        syncEquipment2.Value = pendingEquipment2;
+        syncGrenadesLeft.Value = grenadesPerLife;
 
         ApplyTeam(team);
         ApplyClass();
@@ -568,6 +879,7 @@ public class PlayerNetworkSetup : NetworkBehaviour
         {
             // Reserve ammo is weapon-defined inside the profile.
             rifle.ApplyWeaponProfile(WeaponProfiles.Get(syncWeapon.Value));
+            ApplyWeaponViewModel(rifle, syncWeapon.Value);
         }
 
         PlayerController controller = GetComponent<PlayerController>();
@@ -576,6 +888,68 @@ public class PlayerNetworkSetup : NetworkBehaviour
         {
             controller.walkSpeed *= definition.moveSpeedMultiplier;
             controller.sprintSpeed *= definition.moveSpeedMultiplier;
+        }
+    }
+
+    // Re-applies the view model state (used by the item-slot system after it
+    // re-enables weapon renderers on switching back to the rifle).
+    public void RefreshWeaponViewModel()
+    {
+        BoltActionRifle rifle = GetComponent<BoltActionRifle>();
+
+        if (rifle != null)
+        {
+            ApplyWeaponViewModel(rifle, syncWeapon.Value);
+        }
+    }
+
+    // Swap the held weapon model for weapons that have a dedicated view
+    // model (LMG, pistol). The default rifle model is hidden, not destroyed,
+    // so weapons without an entry keep it.
+    private void ApplyWeaponViewModel(BoltActionRifle rifle, WeaponId weapon)
+    {
+        if (rifle.weaponHolder == null)
+        {
+            return;
+        }
+
+        Transform existing = rifle.weaponHolder.Find("WeaponViewModel");
+
+        if (existing != null)
+        {
+            Destroy(existing.gameObject);
+        }
+
+        WeaponVisuals visuals = WeaponVisuals.Load();
+        GameObject prefab = visuals != null ? visuals.GetModel(weapon) : null;
+
+        foreach (Renderer partRenderer in rifle.weaponHolder.GetComponentsInChildren<Renderer>(true))
+        {
+            partRenderer.enabled = prefab == null;
+        }
+
+        if (prefab == null)
+        {
+            return;
+        }
+
+        GameObject model = Instantiate(prefab, rifle.weaponHolder);
+        model.name = "WeaponViewModel";
+        model.transform.localPosition = Vector3.zero;
+        model.transform.localRotation = Quaternion.identity;
+        model.transform.localScale = Vector3.one * visuals.GetModelScale(weapon);
+
+        foreach (Collider modelCollider in model.GetComponentsInChildren<Collider>(true))
+        {
+            Destroy(modelCollider);
+        }
+
+        // Each model needs its own ADS pose so the iron sights line up
+        // (tunable on the WeaponVisuals asset in Resources).
+        if (visuals.TryGetAimPose(weapon, out Vector3 aimPosition, out Vector3 aimEuler))
+        {
+            rifle.aimWeaponLocalPosition = aimPosition;
+            rifle.aimWeaponLocalRotation = aimEuler;
         }
     }
 
@@ -629,12 +1003,23 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
         LocalPlayerCamera = playerCamera;
 
-        // Engineers get build controls (keys 4-7).
-        if (PlayerClasses.Get(AssignedClass).buildDigMultiplier > 1f
-            && GetComponent<FortificationBuilder>() == null)
+        // Everyone carries a shovel and can build/repair (hold F); placement
+        // options inside are gated by class (Engineer structures, Support
+        // ammo box, Medic med box).
+        if (GetComponent<FortificationBuilder>() == null)
         {
             FortificationBuilder builder = gameObject.AddComponent<FortificationBuilder>();
             builder.playerCamera = playerCamera;
+        }
+
+        if (GetComponent<PauseMenu>() == null)
+        {
+            gameObject.AddComponent<PauseMenu>();
+        }
+
+        if (GetComponent<PlayerItemSlots>() == null)
+        {
+            gameObject.AddComponent<PlayerItemSlots>();
         }
 
         if (rifle != null)

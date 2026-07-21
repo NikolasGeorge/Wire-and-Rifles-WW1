@@ -175,12 +175,42 @@ public class PlayerNetworkHealth : NetworkBehaviour
         serverSpawnProtectedUntil = 0f;
     }
 
+    // Owner-requested suicide (pause menu). Bypasses spawn protection and
+    // both health pools, so it is always a full death.
+    [ServerRpc]
+    public void RequestSuicide()
+    {
+        serverSpawnProtectedUntil = 0f;
+        ServerTakeDamage(maxHealth + downedHealth + 100f);
+    }
+
+    // Burn (incendiary): a damage-over-time that lingers after leaving the
+    // fire, plus halved healing while it lasts.
+    private float serverBurnedUntil;
+    private float serverBurnDps;
+    private float burnDamageAccumulator;
+
+    public void ServerIgnite(float damagePerSecond, float duration)
+    {
+        serverBurnedUntil = Mathf.Max(serverBurnedUntil, Time.time + duration);
+        serverBurnDps = Mathf.Max(serverBurnDps, damagePerSecond);
+    }
+
+    [Header("Passive Regen")]
+    public float passiveRegenPerSecond = 1f;
+    private float regenAccumulator;
+
     // Server-side healing from med crates. Only tops up living players.
     public void ServerHeal(float amount)
     {
         if (!IsServerInitialized || syncState.Value != PlayerLifeState.Alive)
         {
             return;
+        }
+
+        if (Time.time < serverBurnedUntil)
+        {
+            amount *= 0.5f;
         }
 
         if (syncHealth.Value >= maxHealth)
@@ -195,6 +225,37 @@ public class PlayerNetworkHealth : NetworkBehaviour
     {
         if (IsServerInitialized)
         {
+            // Small passive regen, applied in whole points once per second
+            // (goes through ServerHeal so the burn debuff halves it).
+            if (syncState.Value == PlayerLifeState.Alive && syncHealth.Value < maxHealth)
+            {
+                regenAccumulator += passiveRegenPerSecond * Time.deltaTime;
+
+                if (regenAccumulator >= 1f)
+                {
+                    regenAccumulator -= 1f;
+                    ServerHeal(1f);
+                }
+            }
+
+            // Burn DOT: keeps ticking for its full duration after leaving
+            // the fire, in half-second bites.
+            if (syncState.Value == PlayerLifeState.Alive && Time.time < serverBurnedUntil && serverBurnDps > 0f)
+            {
+                burnDamageAccumulator += serverBurnDps * Time.deltaTime;
+
+                if (burnDamageAccumulator >= serverBurnDps * 0.5f)
+                {
+                    ServerTakeDamage(burnDamageAccumulator);
+                    burnDamageAccumulator = 0f;
+                }
+            }
+            else if (Time.time >= serverBurnedUntil)
+            {
+                serverBurnDps = 0f;
+                burnDamageAccumulator = 0f;
+            }
+
             ServerUpdate();
         }
 
@@ -467,7 +528,7 @@ public class PlayerNetworkHealth : NetworkBehaviour
             return;
         }
 
-        if (Keyboard.current.rKey.wasPressedThisFrame && DownedElapsed >= giveUpDelay)
+        if (GameSettings.Pressed(GameAction.Reload) && DownedElapsed >= giveUpDelay)
         {
             ServerGiveUp();
         }
