@@ -16,13 +16,18 @@ public enum EquipmentType : byte
     Bandages = 1,
     MedicalKit = 2,
     AmmoCrate = 3,
+    // Obsolete: digging is now a universal melee-shovel ability (slot 3, see
+    // PlayerItemSlots), not a class-selectable equipment. Value kept so old
+    // saved/serialized loadouts don't shift other entries.
     TrenchShovel = 4,
     FlareGun = 5,
     Binoculars = 6,
     Wirecutters = 7,
     RepairTool = 8,
     CommandWhistle = 9,
-    FieldMap = 10
+    FieldMap = 10,
+    Axe = 11,
+    Toolbox = 12
 }
 
 // A player's chosen loadout for one class: weapon slot + grenade + two
@@ -51,9 +56,28 @@ public static class LoadoutData
 
     public static readonly EquipmentType[] AssaultEquipmentPool =
     {
-        EquipmentType.AmmoPouch, EquipmentType.Bandages, EquipmentType.TrenchShovel,
+        EquipmentType.AmmoPouch, EquipmentType.Bandages, EquipmentType.Axe,
         EquipmentType.Binoculars, EquipmentType.Wirecutters
     };
+
+    // The Engineer's kit is otherwise fixed, but its slot-4 tool is a real
+    // choice: area support (Toolbox) versus demolition (Axe).
+    public static readonly EquipmentType[] EngineerEquipmentPool =
+    {
+        EquipmentType.Toolbox, EquipmentType.Axe, EquipmentType.Wirecutters
+    };
+
+    // The equipment a class may choose from for slot 4, or null when its kit
+    // is fully locked.
+    public static EquipmentType[] GetEquipmentPool(PlayerClass playerClass)
+    {
+        switch (playerClass)
+        {
+            case PlayerClass.Assault: return AssaultEquipmentPool;
+            case PlayerClass.Engineer: return EngineerEquipmentPool;
+            default: return null;
+        }
+    }
 
     public static string GetGrenadeName(GrenadeType grenade)
     {
@@ -81,11 +105,20 @@ public static class LoadoutData
             case EquipmentType.RepairTool: return "Repair Tool";
             case EquipmentType.CommandWhistle: return "Command Whistle";
             case EquipmentType.FieldMap: return "Field Map";
+            case EquipmentType.Axe: return "Axe";
+            case EquipmentType.Toolbox: return "Toolbox";
             default: return "Ammo Pouch";
         }
     }
 
     // Fixed identity loadout for each class (Assault's is just the default).
+    //
+    // Equipment1 is the class's slot-4 item (see PlayerItemSlots). Slot 3 is
+    // ALWAYS the universal shovel regardless of class, so no kit needs to
+    // carry a digging item — equipment2 is otherwise unused in-game.
+    //
+    // The Axe is deliberately NOT universal: only the Engineer carries one by
+    // default, and only Assault can choose one (it is in the pool below).
     public static LoadoutSelection GetDefault(PlayerClass playerClass)
     {
         switch (playerClass)
@@ -93,11 +126,11 @@ public static class LoadoutData
             case PlayerClass.Medic:
                 return Make(GrenadeType.Smoke, EquipmentType.MedicalKit, EquipmentType.Bandages);
             case PlayerClass.Support:
-                return Make(GrenadeType.Stick, EquipmentType.AmmoCrate, EquipmentType.TrenchShovel);
+                return Make(GrenadeType.Stick, EquipmentType.AmmoCrate, EquipmentType.Bandages);
             case PlayerClass.Scout:
                 return Make(GrenadeType.Flare, EquipmentType.FlareGun, EquipmentType.Binoculars);
             case PlayerClass.Engineer:
-                return Make(GrenadeType.Incendiary, EquipmentType.Wirecutters, EquipmentType.TrenchShovel);
+                return Make(GrenadeType.Incendiary, EquipmentType.Toolbox, EquipmentType.Wirecutters);
             case PlayerClass.Officer:
                 return Make(GrenadeType.Smoke, EquipmentType.CommandWhistle, EquipmentType.FieldMap);
             default:
@@ -136,10 +169,21 @@ public static class LoadoutData
     // choices must come from the pools.
     public static LoadoutSelection Sanitize(PlayerClass playerClass, LoadoutSelection requested)
     {
+        EquipmentType[] pool = GetEquipmentPool(playerClass);
+
         if (!PlayerClasses.Get(playerClass).customizableLoadout)
         {
             LoadoutSelection fixedLoadout = GetDefault(playerClass);
             fixedLoadout.weaponIndex = requested.weaponIndex;
+
+            // A locked class may still swap its slot-4 tool if it has a pool
+            // (Engineer: Toolbox / Axe / Wirecutters). Everything else in the
+            // kit stays fixed.
+            if (pool != null && System.Array.IndexOf(pool, requested.equipment1) >= 0)
+            {
+                fixedLoadout.equipment1 = requested.equipment1;
+            }
+
             return fixedLoadout;
         }
 

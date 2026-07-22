@@ -28,6 +28,7 @@ public class FortificationBuilder : MonoBehaviour
     private float structureScanTimer;
     private FortificationStructure nearestWorkable;
     private bool workLatched; // tap-to-build latch (see GameSettings.TapToBuild)
+    private float workSoundTimer;
 
     public float deconstructHoldTime = 2f;
     private float deconstructTimer;
@@ -35,6 +36,14 @@ public class FortificationBuilder : MonoBehaviour
 
     private void Start()
     {
+        // MenuOpen is static so every system (look, cursor, firing) can gate
+        // on one shared flag. That means it MUST be force-cleared the moment
+        // a fresh local player comes online — a stale true left over from a
+        // previous life (or a Play session with domain reload disabled)
+        // would otherwise freeze look/cursor/firing on next spawn with no
+        // menu visibly open to explain why.
+        CloseBuildMenu();
+
         health = GetComponent<PlayerNetworkHealth>();
         setup = GetComponent<PlayerNetworkSetup>();
 
@@ -46,8 +55,23 @@ public class FortificationBuilder : MonoBehaviour
 
     private void OnDestroy()
     {
+        // MenuOpen is static and players are despawned on death: without
+        // this the flag survives the body and every later life spawns with
+        // look disabled and a loose cursor.
+        CloseBuildMenu();
         ClearGhost();
         StopBuilding();
+    }
+
+    private static void CloseBuildMenu()
+    {
+        if (!MenuOpen)
+        {
+            return;
+        }
+
+        MenuOpen = false;
+        SetMenuCursor(false);
     }
 
     // Placement options for this player's class.
@@ -68,9 +92,206 @@ public class FortificationBuilder : MonoBehaviour
             types.Add(FortificationType.LowWire);
             types.Add(FortificationType.HighWire);
             types.Add(FortificationType.TrenchWall);
+            types.Add(FortificationType.DuckBoards);
+            types.Add(FortificationType.MakeshiftFloor);
+            types.Add(FortificationType.Ladder);
+            types.Add(FortificationType.CorrugatedRoof);
         }
 
         return types;
+    }
+
+    // ---- Build menu ----
+    // Too many buildables to keep hanging off number keys, so B opens a
+    // list. Gated on the shovel being out: the tool you build with is the
+    // tool that opens the menu.
+    // Static like PauseMenu.IsOpen, and for the same reason: movement,
+    // looking, firing and slot switching all have to stand down while it is
+    // up, and only the local player ever has a builder.
+    public static bool MenuOpen { get; private set; }
+
+    private PlayerItemSlots slots;
+
+    // Class is the only gate — the menu opens whatever you are holding.
+    private bool CanOpenBuildMenu()
+    {
+        return setup != null && PlayerClasses.Get(setup.AssignedClass).buildDigMultiplier > 1f;
+    }
+
+    private void HandleBuildMenu()
+    {
+        bool wasOpen = MenuOpen;
+
+        if (Keyboard.current.bKey.wasPressedThisFrame && (MenuOpen || CanOpenBuildMenu()))
+        {
+            MenuOpen = !MenuOpen;
+        }
+
+        if (MenuOpen && Keyboard.current.escapeKey.wasPressedThisFrame)
+        {
+            MenuOpen = false;
+        }
+
+        // Putting the shovel away closes it.
+        if (MenuOpen && !CanOpenBuildMenu())
+        {
+            MenuOpen = false;
+        }
+
+        if (MenuOpen != wasOpen)
+        {
+            SetMenuCursor(MenuOpen);
+        }
+    }
+
+    // The grid is clicked, so the cursor has to come back while it is up.
+    private static void SetMenuCursor(bool open)
+    {
+        Cursor.lockState = open ? CursorLockMode.None : CursorLockMode.Locked;
+        Cursor.visible = open;
+    }
+
+    private void SelectBuildable(FortificationType type)
+    {
+        StartGhost(type);
+        MenuOpen = false;
+        SetMenuCursor(false);
+    }
+
+    [Header("Build Menu")]
+    public int buildMenuColumns = 5;
+    public float buildMenuTileSize = 104f;
+
+    private void DrawBuildMenu()
+    {
+        if (!MenuOpen || FortificationManager.Instance == null)
+        {
+            return;
+        }
+
+        List<FortificationType> types = GetPlaceableTypes();
+
+        if (types.Count == 0)
+        {
+            return;
+        }
+
+        const float pad = 8f;
+        const float headerHeight = 40f;
+        float labelHeight = 20f;
+        float cell = buildMenuTileSize;
+        int columns = Mathf.Max(1, buildMenuColumns);
+        int rows = Mathf.CeilToInt(types.Count / (float)columns);
+
+        float width = columns * cell + pad * 2f;
+        float height = headerHeight + rows * (cell + labelHeight) + pad * 2f;
+        float x = (Screen.width - width) * 0.5f;
+        float y = (Screen.height - height) * 0.5f;
+
+        // Panel.
+        GUI.color = new Color(0.06f, 0.05f, 0.04f, 0.88f);
+        GUI.DrawTexture(new Rect(x, y, width, height), Texture2D.whiteTexture);
+        GUI.color = new Color(0.55f, 0.48f, 0.36f, 0.9f);
+        DrawFrame(new Rect(x, y, width, height), 2f);
+        GUI.color = Color.white;
+
+        // Header: what you have, and what you are earning.
+        int supplies = setup != null ? FortificationManager.Instance.GetSupplies(setup.AssignedTeam) : 0;
+        float perMinute = FortificationManager.Instance.SuppliesPerMinute;
+
+        GUIStyle headerStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 18,
+            fontStyle = FontStyle.BoldAndItalic,
+            alignment = TextAnchor.MiddleCenter
+        };
+        headerStyle.normal.textColor = new Color(0.95f, 0.92f, 0.82f);
+
+        GUI.Label(new Rect(x, y + 8f, width, 26f),
+            supplies + " Build Point(s)   +" + Mathf.RoundToInt(perMinute) + " per Minute", headerStyle);
+
+        GUI.color = new Color(0.55f, 0.48f, 0.36f, 0.5f);
+        GUI.DrawTexture(new Rect(x + pad, y + headerHeight - 2f, width - pad * 2f, 1f), Texture2D.whiteTexture);
+        GUI.color = Color.white;
+
+        for (int i = 0; i < types.Count; i++)
+        {
+            int column = i % columns;
+            int row = i / columns;
+
+            Rect tile = new Rect(
+                x + pad + column * cell,
+                y + headerHeight + pad + row * (cell + labelHeight),
+                cell - 4f,
+                cell - 4f);
+
+            DrawBuildTile(tile, types[i], supplies, labelHeight);
+        }
+    }
+
+    private void DrawBuildTile(Rect tile, FortificationType type, int supplies, float labelHeight)
+    {
+        int cost = FortificationManager.GetCost(type);
+        bool affordable = supplies >= cost;
+        bool hovered = tile.Contains(Event.current.mousePosition);
+
+        // Tile background, brightened under the cursor.
+        GUI.color = hovered
+            ? new Color(0.28f, 0.25f, 0.19f, 1f)
+            : new Color(0.16f, 0.15f, 0.12f, 1f);
+        GUI.DrawTexture(tile, Texture2D.whiteTexture);
+
+        GUI.color = new Color(0.45f, 0.4f, 0.3f, 0.8f);
+        DrawFrame(tile, 1f);
+        GUI.color = Color.white;
+
+        // Rendered prop thumbnail; falls back to the name if it could not be
+        // built (missing prefab and no primitive fallback).
+        Texture icon = StructureIcons.Get(type);
+
+        if (icon != null)
+        {
+            GUI.DrawTexture(new Rect(tile.x + 3f, tile.y + 3f, tile.width - 6f, tile.height - 6f),
+                icon, ScaleMode.ScaleToFit);
+        }
+
+        GUIStyle nameStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 10,
+            alignment = TextAnchor.LowerCenter,
+            wordWrap = true
+        };
+        nameStyle.normal.textColor = new Color(0.92f, 0.9f, 0.82f, 0.95f);
+
+        GUI.Label(new Rect(tile.x, tile.y + tile.height - 30f, tile.width, 28f),
+            FortificationManager.GetDisplayName(type), nameStyle);
+
+        GUIStyle costStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 12,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter
+        };
+        costStyle.normal.textColor = affordable
+            ? new Color(0.85f, 0.82f, 0.72f)
+            : new Color(1f, 0.42f, 0.36f);
+
+        GUI.Label(new Rect(tile.x, tile.y + tile.height + 1f, tile.width, labelHeight),
+            cost + " BP", costStyle);
+
+        // Invisible button over the whole tile so the art is the control.
+        if (GUI.Button(tile, GUIContent.none, GUIStyle.none) && affordable)
+        {
+            SelectBuildable(type);
+        }
+    }
+
+    private static void DrawFrame(Rect rect, float thickness)
+    {
+        GUI.DrawTexture(new Rect(rect.x, rect.y, rect.width, thickness), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x, rect.yMax - thickness, rect.width, thickness), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.x, rect.y, thickness, rect.height), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(rect.xMax - thickness, rect.y, thickness, rect.height), Texture2D.whiteTexture);
     }
 
     private void Update()
@@ -82,12 +303,23 @@ public class FortificationBuilder : MonoBehaviour
 
         if (health != null && health.State != PlayerLifeState.Alive)
         {
+            CloseBuildMenu();
             ClearGhost();
             StopBuilding();
             return;
         }
 
         if (PauseMenu.IsOpen)
+        {
+            StopBuilding();
+            return;
+        }
+
+        HandleBuildMenu();
+
+        // While the menu is up its number keys pick structures, so nothing
+        // else should read input this frame.
+        if (MenuOpen)
         {
             StopBuilding();
             return;
@@ -111,10 +343,10 @@ public class FortificationBuilder : MonoBehaviour
         digAimTimer -= Time.deltaTime;
     }
 
-    // Digging requires the trench shovel held (an equipment slot):
-    // PlayerItemSlots calls this every frame LMB (dig) or RMB (fill) is
-    // held. The server paces scoops by class dig multiplier (Engineer 2x)
-    // and enforces every rule.
+    // Digging is universal (slot 3, the Shovel — see PlayerItemSlots): a
+    // swing that lands on open ground calls this once with fill=false;
+    // holding RMB calls it every frame with fill=true. The server paces
+    // scoops by class dig multiplier (Engineer 2x) and enforces every rule.
     private float digAimTimer;
     private string digBlockedReason = "";
     private float digReasonTime = -999f;
@@ -142,12 +374,6 @@ public class FortificationBuilder : MonoBehaviour
             return;
         }
 
-        if (TerrainDigManager.BlockedByStructure(hit.point, digManager.structureClearance))
-        {
-            SetDigBlockedReason("TOO CLOSE TO A STRUCTURE");
-            return;
-        }
-
         // Client-side pacing mirrors the server's rate limit so we do not
         // spam RPCs that would just be dropped.
         float digMultiplier = setup != null
@@ -158,6 +384,7 @@ public class FortificationBuilder : MonoBehaviour
         {
             digAimTimer = TerrainDigManager.Instance.scoopInterval / digMultiplier;
             digManager.RequestDig(hit.point, fill);
+            ProceduralAudio.PlayAt(ProceduralAudio.Dig, hit.point, 0.55f);
         }
     }
 
@@ -230,30 +457,10 @@ public class FortificationBuilder : MonoBehaviour
         return nearest;
     }
 
+    // Structures are chosen from the B menu now; this only handles cancelling
+    // a raised ghost.
     private void HandlePlacementSelection()
     {
-        List<FortificationType> types = GetPlaceableTypes();
-
-        // 1-4 belong to the item-slot system; structures live on 5-8.
-        Key[] keys = { Key.Digit5, Key.Digit6, Key.Digit7, Key.Digit8 };
-
-        for (int i = 0; i < types.Count && i < keys.Length; i++)
-        {
-            if (Keyboard.current[keys[i]].wasPressedThisFrame)
-            {
-                if (ghost != null && ghostType == types[i])
-                {
-                    ClearGhost();
-                }
-                else
-                {
-                    StartGhost(types[i]);
-                }
-
-                return;
-            }
-        }
-
         if (ghost != null && Keyboard.current.xKey.wasPressedThisFrame)
         {
             ClearGhost();
@@ -290,12 +497,13 @@ public class FortificationBuilder : MonoBehaviour
         }
 
         Shader transparentShader = Shader.Find("Sprites/Default");
+        ghostMaterials.Clear();
 
         foreach (Renderer ghostRenderer in ghost.GetComponentsInChildren<Renderer>(true))
         {
             Material ghostMaterial = new Material(transparentShader)
             {
-                color = new Color(0.4f, 0.9f, 1f, 0.2f)
+                color = ghostValidColor
             };
 
             Material[] materials = new Material[ghostRenderer.sharedMaterials.Length];
@@ -306,6 +514,28 @@ public class FortificationBuilder : MonoBehaviour
             }
 
             ghostRenderer.materials = materials;
+            ghostMaterials.Add(ghostMaterial);
+        }
+    }
+
+    [Header("Ghost Colors")]
+    public Color ghostValidColor = new Color(0.4f, 0.9f, 1f, 0.2f);
+    public Color ghostInvalidColor = new Color(1f, 0.25f, 0.2f, 0.28f);
+
+    // Materials driving the ghost preview, recoloured every frame so an
+    // illegal spot reads as red before you ever press place.
+    private readonly List<Material> ghostMaterials = new List<Material>();
+
+    private void ApplyGhostTint(bool valid)
+    {
+        Color tint = valid ? ghostValidColor : ghostInvalidColor;
+
+        foreach (Material material in ghostMaterials)
+        {
+            if (material != null)
+            {
+                material.color = tint;
+            }
         }
     }
 
@@ -365,6 +595,13 @@ public class FortificationBuilder : MonoBehaviour
             targetPoint = transform.position + forward.normalized * 3f;
         }
 
+        // Floors and roofs lock to their neighbours so a walkway or a roofed
+        // stretch comes out flush instead of hand-aligned.
+        if (SnapsToNeighbours(ghostType))
+        {
+            targetPoint = SnapToNeighbour(targetPoint, ghostType);
+        }
+
         ghost.transform.position = targetPoint;
         ghost.transform.rotation = Quaternion.Euler(0f, ghostYaw, 0f);
 
@@ -376,14 +613,10 @@ public class FortificationBuilder : MonoBehaviour
             ghostValid = false;
             ghostInvalidReason = "TOO FAR";
         }
-        else if (supporting != null && !CanStackOn(supporting))
-        {
-            ghostValid = false;
-            ghostInvalidReason = supporting.type == ghostType && !supporting.complete
-                ? "FINISH THE ONE BELOW FIRST"
-                : "MUST BE PLACED ON GROUND";
-        }
-        else if (supporting == null && Vector3.Angle(groundNormal, Vector3.up) > maxGroundAngle)
+        // Anything solid counts as a foundation, so there is no on-ground
+        // rule left to fail — only the slope of actual terrain matters.
+        else if (supporting == null && !FortificationManager.KeepsPlacedHeight(ghostType)
+            && Vector3.Angle(groundNormal, Vector3.up) > maxGroundAngle)
         {
             ghostValid = false;
             ghostInvalidReason = "GROUND TOO STEEP";
@@ -404,12 +637,112 @@ public class FortificationBuilder : MonoBehaviour
                 + FortificationManager.GetCost(ghostType) + ")";
         }
 
+        ApplyGhostTint(ghostValid);
+
         // Confirm.
         if (ghostValid && GameSettings.Pressed(GameAction.Interact) && FortificationManager.Instance != null)
         {
             FortificationManager.Instance.RequestPlace(ghostType, ghost.transform.position, ghostYaw);
             ClearGhost();
         }
+    }
+
+    [Header("Snapping")]
+    [Tooltip("How close a matching neighbour must be before the ghost locks to it (floors and roofs).")]
+    public float floorSnapRange = 3.5f;
+
+    private static bool SnapsToNeighbours(FortificationType type)
+    {
+        return type == FortificationType.MakeshiftFloor
+            || type == FortificationType.CorrugatedRoof;
+    }
+
+    // Tile pitch for the snap grid. The floor's is fixed because it also
+    // drives its collider; the roof's is measured off the ghost, so it stays
+    // correct whatever prop is assigned to it.
+    private float TileSizeFor(FortificationType type)
+    {
+        if (type == FortificationType.MakeshiftFloor)
+        {
+            return FortificationManager.MakeshiftFloorTileSize;
+        }
+
+        if (ghost != null)
+        {
+            Bounds bounds = new Bounds(ghost.transform.position, Vector3.zero);
+            bool found = false;
+
+            foreach (Renderer renderer in ghost.GetComponentsInChildren<Renderer>(true))
+            {
+                if (!found)
+                {
+                    bounds = renderer.bounds;
+                    found = true;
+                }
+                else
+                {
+                    bounds.Encapsulate(renderer.bounds);
+                }
+            }
+
+            if (found)
+            {
+                return Mathf.Max(0.5f, Mathf.Max(bounds.size.x, bounds.size.z));
+            }
+        }
+
+        return 3f;
+    }
+
+    // Snaps the ghost to the nearest matching neighbour's grid: same yaw,
+    // same height, and offset by a whole number of tiles along that
+    // neighbour's own axes. Because it adopts the neighbour's rotation, a run
+    // stays aligned no matter which way the player is facing while placing.
+    private Vector3 SnapToNeighbour(Vector3 desired, FortificationType type)
+    {
+        FortificationStructure nearest = null;
+        float nearestDistance = floorSnapRange;
+
+        foreach (FortificationStructure structure in FortificationStructure.All)
+        {
+            if (structure == null || structure.type != type)
+            {
+                continue;
+            }
+
+            float distance = Vector3.Distance(structure.transform.position, desired);
+
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = structure;
+            }
+        }
+
+        if (nearest == null)
+        {
+            return desired;
+        }
+
+        float tile = TileSizeFor(type);
+        Transform anchor = nearest.transform;
+
+        // Offset from the neighbour expressed in ITS local axes, rounded to
+        // whole tiles, then rebuilt as a world position.
+        Vector3 local = anchor.InverseTransformPoint(desired);
+        local.x = Mathf.Round(local.x / tile) * tile;
+        local.z = Mathf.Round(local.z / tile) * tile;
+        local.y = 0f;
+
+        // Never snap exactly on top of the neighbour.
+        if (Mathf.Approximately(local.x, 0f) && Mathf.Approximately(local.z, 0f))
+        {
+            local.x = Mathf.Abs(local.x) >= Mathf.Abs(local.z) ? tile : 0f;
+            local.z = Mathf.Approximately(local.x, 0f) ? tile : 0f;
+        }
+
+        ghostYaw = anchor.eulerAngles.y;
+        return anchor.TransformPoint(local);
     }
 
     // Client-side mirror of the server's same-type stacking rule so the ghost
@@ -477,6 +810,23 @@ public class FortificationBuilder : MonoBehaviour
         bool wantsToWork = interactActive && nearestWorkable != null;
         int targetId = wantsToWork ? nearestWorkable.id : -1;
 
+        // Rhythmic work sound while actually building or repairing. Local
+        // only — it is feedback for the person swinging, not a world event.
+        if (wantsToWork)
+        {
+            workSoundTimer -= Time.deltaTime;
+
+            if (workSoundTimer <= 0f)
+            {
+                workSoundTimer = 0.55f;
+                ProceduralAudio.PlayAt(ProceduralAudio.BuildTick, nearestWorkable.transform.position, 0.5f);
+            }
+        }
+        else
+        {
+            workSoundTimer = 0f;
+        }
+
         if (targetId != buildingStructureId)
         {
             buildingStructureId = targetId;
@@ -486,16 +836,6 @@ public class FortificationBuilder : MonoBehaviour
                 FortificationManager.Instance.SetBuilding(buildingStructureId);
             }
         }
-    }
-
-    // Mirrors the server rule: you may stack only onto a COMPLETED structure
-    // of the same type, and only for types that allow a stack (not wire).
-    private bool CanStackOn(FortificationStructure supporting)
-    {
-        int limit = FortificationManager.GetStackLimit(ghostType,
-            FortificationManager.Instance != null ? FortificationManager.Instance.maxSameTypeStack : 2);
-
-        return supporting.type == ghostType && supporting.complete && limit > 1;
     }
 
     // "HOLD F TO BUILD " / "TAP F TO BUILD ", using the current Interact
@@ -646,6 +986,7 @@ public class FortificationBuilder : MonoBehaviour
 
     private void DrawPlacementHud()
     {
+        DrawBuildMenu();
         DrawDigHint();
 
         List<FortificationType> types = GetPlaceableTypes();
@@ -663,13 +1004,8 @@ public class FortificationBuilder : MonoBehaviour
         style.normal.textColor = new Color(1f, 1f, 1f, 0.75f);
 
         int supplies = setup != null ? FortificationManager.Instance.GetSupplies(setup.AssignedTeam) : 0;
-        string text = "SUPPLIES: " + supplies + "    PLACE: ";
-
-        for (int i = 0; i < types.Count; i++)
-        {
-            text += " [" + (5 + i) + "] " + FortificationManager.GetDisplayName(types[i])
-                + " (" + FortificationManager.GetCost(types[i]) + ")";
-        }
+        string text = "SUPPLIES: " + supplies
+            + (CanOpenBuildMenu() ? "    [B] BUILD MENU" : "    SHOVEL OUT TO BUILD");
 
 
         if (ghost != null)
@@ -752,12 +1088,20 @@ public class FortificationBuilder : MonoBehaviour
         GUI.color = fillColor;
         GUI.DrawTexture(new Rect(x, y, barWidth * Mathf.Clamp01(fill), barHeight), Texture2D.whiteTexture);
 
-        // Checkpoint ticks at 25/50/75.
-        GUI.color = new Color(0f, 0f, 0f, 0.8f);
-
+        // Checkpoint ticks at 25/50/75. While building, a passed checkpoint
+        // is banked — progress can never fall back below it — so reached
+        // ticks are drawn bright and unreached ones stay dark.
         for (int i = 1; i <= 3; i++)
         {
-            GUI.DrawTexture(new Rect(x + barWidth * 0.25f * i - 1f, y, 2f, barHeight), Texture2D.whiteTexture);
+            bool banked = !nearestWorkable.complete && fill >= i * 0.25f;
+
+            GUI.color = banked
+                ? new Color(1f, 1f, 1f, 0.95f)
+                : new Color(0f, 0f, 0f, 0.8f);
+
+            float tickWidth = banked ? 3f : 2f;
+            GUI.DrawTexture(new Rect(x + barWidth * 0.25f * i - tickWidth * 0.5f, y, tickWidth, barHeight),
+                Texture2D.whiteTexture);
         }
 
         GUI.color = Color.white;

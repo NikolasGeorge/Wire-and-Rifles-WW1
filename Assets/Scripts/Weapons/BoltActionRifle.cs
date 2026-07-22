@@ -33,6 +33,12 @@ public class BoltActionRifle : NetworkBehaviour
     public Vector3 sprintWeaponLocalRotation = new Vector3(25f, -10f, 8f);
     public float weaponPoseMoveSpeed = 10f;
 
+    // Incoming-fire state for this player; widens spread while suppressed.
+    private PlayerSuppression suppression;
+
+    [Tooltip("Scales how hard this weapon's near-misses suppress, on top of damage weighting.")]
+    public float suppressionMultiplier = 1f;
+
     [Header("Aiming Down Sights")]
     public bool isAiming;
     // Latch for toggle-ADS gameplay option (see GameSettings.ToggleAds).
@@ -147,6 +153,10 @@ public class BoltActionRifle : NetworkBehaviour
         shellByShellReload = profile.shellByShellReload;
         requiresDeploySetup = profile.requiresDeploySetup;
         deploySetupTime = profile.deploySetupTime;
+
+        // Unset in a profile means "ordinary", not "cannot suppress".
+        suppressionMultiplier = profile.suppressionMultiplier > 0f ? profile.suppressionMultiplier : 1f;
+
         hipFieldOfView = profile.hipFieldOfView;
         aimFieldOfView = profile.aimFieldOfView;
 
@@ -195,6 +205,13 @@ public class BoltActionRifle : NetworkBehaviour
     [TargetRpc]
     private void TargetReserveAmmoUpdated(NetworkConnection connection, int newReserve)
     {
+        // Resupply is otherwise completely silent — the number in the corner
+        // just quietly climbs and nobody notices the crate is working.
+        if (newReserve > reserveAmmo)
+        {
+            ProceduralAudio.PlayAt(ProceduralAudio.Resupply, transform.position, 0.35f);
+        }
+
         reserveAmmo = newReserve;
     }
 
@@ -293,6 +310,13 @@ public class BoltActionRifle : NetworkBehaviour
                 inaccuracy *= deployedSpreadMultiplier;
             }
 
+            // Being shot at makes you shoot worse. Added rather than scaled
+            // so it still bites a fully-settled ADS shot.
+            if (suppression != null)
+            {
+                inaccuracy += suppression.InaccuracyPenalty;
+            }
+
             return inaccuracy;
         }
     }
@@ -318,6 +342,8 @@ public class BoltActionRifle : NetworkBehaviour
         {
             shooterTeam = GetComponentInParent<PlayerTeam>();
         }
+
+        suppression = GetComponentInParent<PlayerSuppression>();
 
         if (audioSource == null)
         {
@@ -419,7 +445,7 @@ public class BoltActionRifle : NetworkBehaviour
             return;
         }
 
-        if (PauseMenu.IsOpen)
+        if (PauseMenu.IsOpen || FortificationBuilder.MenuOpen)
         {
             return;
         }
@@ -847,7 +873,7 @@ public class BoltActionRifle : NetworkBehaviour
             {
                 float structureShotDistance = Vector3.Distance(shotStartPoint, shotEndPoint);
                 FortificationManager.Instance.ReportStructureDamage(
-                    fortification.id, GetBaseDamageAtDistance(structureShotDistance, false));
+                    fortification.id, GetBaseDamageAtDistance(structureShotDistance, false), DamageType.Bullet);
             }
 
             yield break;
@@ -894,6 +920,21 @@ public class BoltActionRifle : NetworkBehaviour
         {
             Debug.LogWarning("No HealthComponent found on " + hit.collider.name + " or its parents.");
         }
+    }
+
+    // What a round would have done had it connected at this range. Drives
+    // suppression: how badly a near-miss rattles you scales with how badly
+    // it could have hurt you.
+    public float GetPotentialDamageAt(float distance)
+    {
+        return GetBaseDamageAtDistance(distance, false);
+    }
+
+    // The same figure scaled by the weapon's own suppression character, so a
+    // sniper round unsettles far more than its damage alone would suggest.
+    public float GetSuppressionWeightAt(float distance)
+    {
+        return GetPotentialDamageAt(distance) * suppressionMultiplier;
     }
 
     // Base (pre-hitbox-multiplier) damage at a given shot distance. Headshots
@@ -1283,6 +1324,12 @@ public class BoltActionRifle : NetworkBehaviour
 
         ObserversPlayFireEffects(shotStartPoint, shotEndPoint, didHit, hitNormal);
 
+        // Rounds cracking past an enemy suppress them, hit or miss — a hit
+        // just counts for more.
+        PlayerSuppression.ServerApplyShotSuppression(this, shotStartPoint, shotEndPoint,
+            shooterTeam != null ? shooterTeam.team : Team.Neutral, OwnerId,
+            didHit ? targetObject : null);
+
         if (!didHit || targetObject == null || targetObject == NetworkObject)
         {
             return;
@@ -1326,7 +1373,7 @@ public class BoltActionRifle : NetworkBehaviour
                 yield break;
             }
 
-            killedTarget = playerHealth.ServerTakeDamage(finalDamage);
+            killedTarget = playerHealth.ServerTakeDamage(finalDamage, shotStartPoint);
         }
         else
         {
@@ -1341,6 +1388,12 @@ public class BoltActionRifle : NetworkBehaviour
 
                 killedTarget = health.TakeDamage(finalDamage);
             }
+        }
+
+        // Death effect on the man who took it: his last moments white out.
+        if (killedTarget && isHeadshot)
+        {
+            PlayerSuppression.ServerApplyHeadshotKillEffect(targetObject);
         }
 
         if (shooter != null && shooter.IsActive)

@@ -1,3 +1,5 @@
+using System.Collections;
+using FishNet.Connection;
 using FishNet.Object;
 using FishNet.Object.Synchronizing;
 using UnityEngine;
@@ -18,6 +20,14 @@ public class PlayerNetworkSetup : NetworkBehaviour
     [Tooltip("Humanoid avatar of the soldier rig (Characters.fbx). Used when the cloned rig has no Animator of its own.")]
     public Avatar soldierAvatar;
 
+    [Header("Enemy Visibility")]
+    [Tooltip("Boosts saturation/brightness on enemy uniforms (relative to the LOCAL viewer's team) so they pop against the terrain — no outline, just more vivid color. Always on.")]
+    public bool boostEnemyContrast = true;
+    public float enemyContrastSaturationMultiplier = 1.4f;
+    public float enemyContrastSaturationAdd = 0.15f;
+    public float enemyContrastValueMultiplier = 1.15f;
+    public float enemyContrastValueAdd = 0.1f;
+
     private bool soldierModelCreated;
 
     // Server-assigned team, alternated per spawned player.
@@ -31,9 +41,14 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
     [Header("Scout Flare Spotting")]
     public float flareCooldown = 10f;
-    public float flareRange = 80f;
     public float spotRadius = 20f;
     public float spotDuration = 8f;
+
+    [Tooltip("How long a fired flare burns and keeps revealing enemies beneath it.")]
+    public float flareBurnSeconds = 24f;
+
+    [Tooltip("Muzzle velocity along the crosshair. The flare goes exactly where it is aimed — aim high to get height.")]
+    public float flareLaunchSpeed = 25.5f;
 
     // Spot replication: the server bumps the pulse and sets the spotting team;
     // every client restarts its local countdown on the pulse change.
@@ -84,6 +99,253 @@ public class PlayerNetworkSetup : NetworkBehaviour
     public float grenadeMaxDamage = 90f;
     public float grenadeFlareSpotRadius = 15f;
 
+    // ---- Melee tools (Shovel is universal; Axe is Engineer/Assault only) ----
+    [Header("Melee Tools")]
+    public float shovelMeleeRange = 2.2f;
+    public float axeMeleeRange = 2.2f;
+    public float shovelPlayerDamage = 70f;
+    public float axePlayerDamage = 80f;
+    public float shovelStructureDamage = 75f;
+    public float shovelSwingCooldown = 0.75f;
+    public float axeSwingCooldown = 0.9f;
+
+    [Tooltip("The axe's anti-structure bonus over the shovel. Derived rather than a separate field so the two can never drift apart; per-structure resistances apply on top.")]
+    public float axeStructureBonus = 4f;
+
+    public float AxeStructureDamage => shovelStructureDamage * axeStructureBonus;
+
+    private float serverNextShovelSwingTime;
+    private float serverNextAxeSwingTime;
+
+    // Called by PlayerItemSlots after its own local raycast resolves what
+    // the swing hit (player / structure / neither).
+    [ServerRpc]
+    public void RequestMeleeAttack(Vector3 origin, Vector3 hitPoint, NetworkObject targetObject, int structureId, DamageType damageType)
+    {
+        if (damageType != DamageType.Shovel && damageType != DamageType.Axe)
+        {
+            return;
+        }
+
+        bool isAxe = damageType == DamageType.Axe;
+        float cooldown = isAxe ? axeSwingCooldown : shovelSwingCooldown;
+        float range = isAxe ? axeMeleeRange : shovelMeleeRange;
+
+        if (isAxe)
+        {
+            if (Time.time < serverNextAxeSwingTime)
+            {
+                return;
+            }
+
+            serverNextAxeSwingTime = Time.time + cooldown;
+        }
+        else
+        {
+            if (Time.time < serverNextShovelSwingTime)
+            {
+                return;
+            }
+
+            serverNextShovelSwingTime = Time.time + cooldown;
+        }
+
+        // Sanity checks against a spoofed origin/hit point, matching the
+        // rifle's shot-origin/range tolerance conventions.
+        Vector3 approximateEyePosition = transform.position + Vector3.up * 1.6f;
+
+        if (Vector3.Distance(approximateEyePosition, origin) > 2f
+            || Vector3.Distance(origin, hitPoint) > range + 1f)
+        {
+            return;
+        }
+
+        PlayerNetworkHealth ownHealth = GetComponent<PlayerNetworkHealth>();
+
+        if (ownHealth != null)
+        {
+            ownHealth.ServerCancelSpawnProtection();
+        }
+
+        float structureDamage = isAxe ? AxeStructureDamage : shovelStructureDamage;
+        float playerDamage = isAxe ? axePlayerDamage : shovelPlayerDamage;
+
+        if (structureId >= 0)
+        {
+            if (FortificationManager.Instance != null)
+            {
+                FortificationManager.Instance.ServerDamageStructureDirect(structureId, structureDamage, damageType, AssignedTeam, this);
+            }
+
+            return;
+        }
+
+        if (targetObject == null || targetObject == NetworkObject)
+        {
+            return;
+        }
+
+        PlayerNetworkHealth targetHealth = targetObject.GetComponent<PlayerNetworkHealth>();
+
+        if (targetHealth == null || targetHealth.IsDead)
+        {
+            return;
+        }
+
+        PlayerTeam targetTeam = targetObject.GetComponentInChildren<PlayerTeam>(true);
+
+        if (targetTeam != null && targetTeam.team != Team.Neutral && targetTeam.team == AssignedTeam)
+        {
+            return;
+        }
+
+        bool killed = targetHealth.ServerTakeDamage(playerDamage, transform.position);
+        ServerReportHit(playerDamage, killed, false);
+    }
+
+    // ---- Suppression relay ----
+    // The server decides a bullet passed close to this player; only the
+    // owner needs to know, since every suppression effect is local.
+    // Throttled PER ATTACKER, never globally — a global throttle would drop
+    // a second shooter's fire entirely.
+    //
+    // Rounds arriving inside a throttle window are SUMMED rather than
+    // discarded, so an automatic weapon's rate advantage survives the
+    // throttle: the client receives the same total damage-weight either way.
+    private readonly System.Collections.Generic.Dictionary<int, float> pendingSuppression =
+        new System.Collections.Generic.Dictionary<int, float>();
+    private readonly System.Collections.Generic.Dictionary<int, float> suppressionFlushTimes =
+        new System.Collections.Generic.Dictionary<int, float>();
+
+    public void ServerNotifySuppression(int attackerClientId, float potentialDamage)
+    {
+        if (!IsServerInitialized || Owner == null || potentialDamage <= 0f)
+        {
+            return;
+        }
+
+        pendingSuppression.TryGetValue(attackerClientId, out float pending);
+        pending += potentialDamage;
+
+        if (suppressionFlushTimes.TryGetValue(attackerClientId, out float nextFlush) && Time.time < nextFlush)
+        {
+            pendingSuppression[attackerClientId] = pending;
+            return;
+        }
+
+        suppressionFlushTimes[attackerClientId] = Time.time + 0.15f;
+        pendingSuppression[attackerClientId] = 0f;
+
+        TargetSuppression(Owner, attackerClientId, pending);
+    }
+
+    // Everyone near a blast gets rattled, friend or foe — it is concussion,
+    // not suppression, so it ignores teams entirely.
+    public static void ServerApplyBlastShake(Vector3 position, float radius)
+    {
+        if (radius <= 0f)
+        {
+            return;
+        }
+
+        foreach (PlayerNetworkSetup player in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+        {
+            float distance = Vector3.Distance(player.transform.position, position);
+
+            if (distance <= radius)
+            {
+                player.ServerNotifyBlastShake(1f - distance / radius);
+            }
+        }
+    }
+
+    public void ServerNotifyBlastShake(float strength)
+    {
+        if (!IsServerInitialized || Owner == null || strength <= 0f)
+        {
+            return;
+        }
+
+        TargetBlastShake(Owner, strength);
+    }
+
+    [TargetRpc]
+    private void TargetBlastShake(NetworkConnection connection, float strength)
+    {
+        PlayerSuppression suppression = GetComponent<PlayerSuppression>();
+
+        if (suppression != null)
+        {
+            suppression.ApplyBlastShake(strength);
+        }
+    }
+
+    // Headshot death effect: a fixed burst of full suppression, sent whole
+    // rather than through the damage-accumulating relay above.
+    public void ServerNotifyDeathShock(float seconds)
+    {
+        if (!IsServerInitialized || Owner == null || seconds <= 0f)
+        {
+            return;
+        }
+
+        TargetDeathShock(Owner, seconds);
+    }
+
+    [TargetRpc]
+    private void TargetDeathShock(NetworkConnection connection, float seconds)
+    {
+        PlayerSuppression suppression = GetComponent<PlayerSuppression>();
+
+        if (suppression != null)
+        {
+            suppression.ApplyDeathShock(seconds);
+        }
+    }
+
+    [TargetRpc]
+    private void TargetSuppression(NetworkConnection connection, int attackerClientId, float potentialDamage)
+    {
+        PlayerSuppression suppression = GetComponent<PlayerSuppression>();
+
+        if (suppression != null)
+        {
+            suppression.RegisterNearMiss(attackerClientId, potentialDamage);
+        }
+    }
+
+    // ---- Hit feedback (hit marker + damage number) ----
+    // Every source of player-dealt damage routes through here so melee,
+    // grenades, fire and structure hits all get the same feedback the rifle
+    // already had. Server-only; the marker is drawn on the attacker's client.
+    [System.NonSerialized] public HitMarkerUI hitMarkerUI;
+
+    public void ServerReportHit(float damage, bool killed, bool isHeadshot)
+    {
+        // `this == null` catches a despawned thrower: grenade and fire damage
+        // can land after the player who caused it has already been destroyed.
+        if (this == null || !IsServerInitialized || damage <= 0f || Owner == null)
+        {
+            return;
+        }
+
+        TargetHitFeedback(Owner, damage, killed, isHeadshot);
+    }
+
+    [TargetRpc]
+    private void TargetHitFeedback(NetworkConnection connection, float damage, bool killed, bool isHeadshot)
+    {
+        if (hitMarkerUI == null)
+        {
+            hitMarkerUI = FindFirstObjectByType<HitMarkerUI>(FindObjectsInactive.Include);
+        }
+
+        if (hitMarkerUI != null)
+        {
+            hitMarkerUI.ShowHitMarker(damage, killed, isHeadshot);
+        }
+    }
+
     private bool classApplied;
 
     public Team AssignedTeam => syncTeam.Value;
@@ -102,6 +364,13 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
     private void Awake()
     {
+        // Needed on every instance: the server scans shot lines against all
+        // of them, and the owner runs the local effects.
+        if (GetComponent<PlayerSuppression>() == null)
+        {
+            gameObject.AddComponent<PlayerSuppression>();
+        }
+
         syncSpotPulse.OnChange += OnSpotPulseChanged;
     }
 
@@ -125,21 +394,30 @@ public class PlayerNetworkSetup : NetworkBehaviour
             return;
         }
 
-        // Scout flare gun: G to fire, spots enemies around the landing point.
-        if (PlayerClasses.Get(AssignedClass).canSpot
-            && UnityEngine.InputSystem.Keyboard.current != null
-            && UnityEngine.InputSystem.Keyboard.current.gKey.wasPressedThisFrame
-            && Time.time - lastFlareTime >= flareCooldown)
-        {
-            Camera aimCamera = cameraRoot != null ? cameraRoot.GetComponent<Camera>() : null;
+    }
 
-            if (aimCamera != null)
-            {
-                lastFlareTime = Time.time;
-                Ray aimRay = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
-                RequestFlare(aimRay.origin, aimRay.direction);
-            }
+    // Fired from the Flare Gun equipment slot (see PlayerItemSlots), not a
+    // bare keypress — the Scout has to actually bring the gun up.
+    public bool FlareReady => Time.time - lastFlareTime >= flareCooldown;
+
+    public void TryFireFlare()
+    {
+        if (!PlayerClasses.Get(AssignedClass).canSpot || !FlareReady)
+        {
+            return;
         }
+
+        Camera aimCamera = cameraRoot != null ? cameraRoot.GetComponent<Camera>() : null;
+
+        if (aimCamera == null)
+        {
+            return;
+        }
+
+        lastFlareTime = Time.time;
+
+        Ray aimRay = aimCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+        RequestFlare(aimRay.origin + aimRay.direction * 0.4f, aimRay.direction);
     }
 
     [ServerRpc]
@@ -157,32 +435,15 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
         serverLastFlareTime = Time.time;
 
-        Vector3 landing = Physics.Raycast(origin, direction, out RaycastHit hit, flareRange,
-            Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore)
-            ? hit.point
-            : origin + direction.normalized * flareRange;
+        // Fired straight down the crosshair — no forced upward bias. Where
+        // the flare goes is entirely the player's aim, so lofting one over a
+        // ridge is a skill rather than something the gun does for you.
+        Vector3 velocity = direction.normalized * flareLaunchSpeed;
 
-        ObserversFlareEffect(landing);
-
-        // Spot every living enemy near the flare.
-        foreach (PlayerNetworkSetup target in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+        if (FortificationManager.Instance != null)
         {
-            if (target == this || target.AssignedTeam == AssignedTeam)
-            {
-                continue;
-            }
-
-            PlayerNetworkHealth targetHealth = target.GetComponent<PlayerNetworkHealth>();
-
-            if (targetHealth != null && targetHealth.IsDead)
-            {
-                continue;
-            }
-
-            if (Vector3.Distance(target.transform.position, landing) <= spotRadius)
-            {
-                target.ServerApplySpotted(AssignedTeam);
-            }
+            FortificationManager.Instance.ServerRunFlare(origin, velocity, AssignedTeam,
+                flareBurnSeconds, spotRadius);
         }
     }
 
@@ -191,6 +452,64 @@ public class PlayerNetworkSetup : NetworkBehaviour
     // deterministic arc every client renders, then explodes: damage +
     // terrain crater for frag-likes, smoke cloud for smoke, area spot for
     // flare.
+
+    // Cooking is tracked on the SERVER, not the client. The client only says
+    // "pin pulled" and later "thrown"; the server owns the clock, so nobody
+    // can cook a grenade to zero and claim a full fuse — or hold one forever.
+    private bool serverCooking;
+    private float serverCookStartTime;
+
+    [ServerRpc]
+    public void RequestBeginCook()
+    {
+        PlayerNetworkHealth health = GetComponent<PlayerNetworkHealth>();
+
+        if (health != null && health.State != PlayerLifeState.Alive)
+        {
+            return;
+        }
+
+        if (syncGrenadesLeft.Value <= 0 || serverCooking)
+        {
+            return;
+        }
+
+        serverCooking = true;
+        serverCookStartTime = Time.time;
+        StartCoroutine(ServerWatchCook());
+    }
+
+    // Hold it past the fuse and it goes off in your hand.
+    private System.Collections.IEnumerator ServerWatchCook()
+    {
+        while (serverCooking)
+        {
+            PlayerNetworkHealth health = GetComponent<PlayerNetworkHealth>();
+
+            // Killed mid-cook: the grenade dies with them rather than
+            // rewarding a corpse with a free explosion.
+            if (health != null && health.State != PlayerLifeState.Alive)
+            {
+                serverCooking = false;
+                yield break;
+            }
+
+            if (Time.time - serverCookStartTime >= GrenadeArc.FuseSeconds)
+            {
+                serverCooking = false;
+
+                if (syncGrenadesLeft.Value > 0)
+                {
+                    syncGrenadesLeft.Value--;
+                    ServerExplode(transform.position + Vector3.up * 1.1f, AssignedGrenade, AssignedTeam);
+                }
+
+                yield break;
+            }
+
+            yield return null;
+        }
+    }
 
     [ServerRpc]
     public void RequestThrowGrenade(Vector3 origin, Vector3 velocity)
@@ -202,7 +521,9 @@ public class PlayerNetworkSetup : NetworkBehaviour
             return;
         }
 
-        if (syncGrenadesLeft.Value <= 0)
+        // The pin has to have been pulled first — this is also what stops a
+        // client throwing without ever paying the cook time.
+        if (!serverCooking || syncGrenadesLeft.Value <= 0)
         {
             return;
         }
@@ -212,29 +533,38 @@ public class PlayerNetworkSetup : NetworkBehaviour
             return;
         }
 
-        velocity = Vector3.ClampMagnitude(velocity, 20f);
+        // Whatever is left of the fuse after however long they held it. The
+        // floor keeps a last-instant throw visibly leaving the hand.
+        float remainingFuse = Mathf.Max(0.15f, GrenadeArc.FuseSeconds - (Time.time - serverCookStartTime));
+
+        serverCooking = false;
+        velocity = Vector3.ClampMagnitude(velocity, 26f);
         syncGrenadesLeft.Value--;
 
-        ObserversSpawnGrenade(origin, velocity);
-        StartCoroutine(ServerGrenadeFuse(origin, velocity, AssignedGrenade, AssignedTeam));
-    }
+        // Handed to the fortification manager rather than run here: this
+        // player may be dead and despawned before the fuse ends.
+        FortificationManager manager = FortificationManager.Instance;
 
-    [ObserversRpc]
-    private void ObserversSpawnGrenade(Vector3 origin, Vector3 velocity)
-    {
-        GrenadeVisual.Spawn(origin, velocity, false, AssignedGrenade);
+        if (manager == null)
+        {
+            return;
+        }
+
+        manager.ObserversWorldGrenadeVisual(origin, velocity, AssignedGrenade, remainingFuse);
+        manager.RunPersistentEffect(
+            ServerGrenadeFuse(origin, velocity, AssignedGrenade, AssignedTeam, remainingFuse));
     }
 
     // Real frame time for BOTH stepping and the fuse clock, matching the
     // client visual exactly — a fixed 0.02 step per frame ran the fuse at
     // several times real speed on fast machines, detonating mid-flight.
     private System.Collections.IEnumerator ServerGrenadeFuse(Vector3 position, Vector3 velocity,
-        GrenadeType grenadeType, Team throwerTeam)
+        GrenadeType grenadeType, Team throwerTeam, float fuseSeconds)
     {
         float elapsed = 0f;
         bool resting = false;
 
-        while (elapsed < GrenadeArc.FuseSeconds)
+        while (elapsed < fuseSeconds)
         {
             float deltaTime = Mathf.Min(Time.deltaTime, 0.05f);
 
@@ -250,10 +580,68 @@ public class PlayerNetworkSetup : NetworkBehaviour
         ServerExplode(position, grenadeType, throwerTeam);
     }
 
+    // How much of a target the blast can actually reach, 0 to 1. Cover
+    // blocks explosives: three samples up the body, and damage scales with
+    // how many of them the blast has a clear line to. Fully behind a wall is
+    // zero; only your head showing over sandbags is a third.
+    private static readonly RaycastHit[] blastHits = new RaycastHit[16];
+
+    private static float BlastExposure(Vector3 blast, Vector3 targetFeet)
+    {
+        int clear = 0;
+
+        for (int i = 0; i < 3; i++)
+        {
+            Vector3 samplePoint = targetFeet + Vector3.up * (0.3f + i * 0.6f);
+            Vector3 delta = samplePoint - blast;
+            float distance = delta.magnitude;
+
+            if (distance < 0.05f)
+            {
+                clear++;
+                continue;
+            }
+
+            int hitCount = Physics.RaycastNonAlloc(blast, delta / distance, blastHits, distance,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore);
+
+            bool blocked = false;
+
+            for (int h = 0; h < hitCount; h++)
+            {
+                // Bodies are not cover — a teammate standing in the way must
+                // not shield you from a blast.
+                if (blastHits[h].collider.GetComponentInParent<PlayerNetworkSetup>() != null
+                    || blastHits[h].collider.GetComponentInParent<HealthComponent>() != null)
+                {
+                    continue;
+                }
+
+                blocked = true;
+                break;
+            }
+
+            if (!blocked)
+            {
+                clear++;
+            }
+        }
+
+        return clear / 3f;
+    }
+
+    // May run after this player has been despawned (see the manager's
+    // persistent-effect note), so every visual goes out through the manager
+    // and anything that talks back to the thrower is null-guarded.
     private void ServerExplode(Vector3 position, GrenadeType grenadeType, Team throwerTeam)
     {
+        FortificationManager manager = FortificationManager.Instance;
         bool smoke = grenadeType == GrenadeType.Smoke;
-        ObserversExplosionFx(position, smoke);
+
+        if (manager != null)
+        {
+            manager.ObserversWorldExplosionFx(position, smoke);
+        }
 
         if (smoke)
         {
@@ -262,14 +650,13 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
         if (grenadeType == GrenadeType.Flare)
         {
-            // Area spot instead of damage.
-            foreach (PlayerNetworkSetup target in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+            // No damage — it pops and burns where it landed, revealing anyone
+            // who walks through for as long as it lasts. A small upward kick
+            // so it sits above the dirt rather than inside it.
+            if (manager != null)
             {
-                if (target.AssignedTeam != throwerTeam && target.AssignedTeam != Team.Neutral
-                    && Vector3.Distance(target.transform.position, position) <= grenadeFlareSpotRadius)
-                {
-                    target.ServerApplySpotted(throwerTeam);
-                }
+                manager.ServerRunFlare(position + Vector3.up * 0.5f, Vector3.up * 3f, throwerTeam,
+                    flareBurnSeconds, grenadeFlareSpotRadius);
             }
 
             return;
@@ -307,22 +694,81 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
             if (distance <= radius)
             {
-                float damage = maxDamage * (1f - distance / radius);
-                target.ServerTakeDamage(damage);
+                float damage = maxDamage * (1f - distance / radius)
+                    * BlastExposure(position, target.transform.position);
+
+                if (damage <= 0f)
+                {
+                    continue;
+                }
+
+                bool killed = target.ServerTakeDamage(damage, position);
+
+                // Self-damage is real, but it should not read as "you hit
+                // someone" on your own screen.
+                if (targetSetup != this)
+                {
+                    ServerReportHit(damage, killed, false);
+                }
             }
         }
+
+        // Practice dummies run the older HealthComponent rather than the
+        // networked one, so without this a grenade landing among them does
+        // nothing at all — and gives the thrower no damage numbers.
+        foreach (HealthComponent dummy in FindObjectsByType<HealthComponent>(FindObjectsSortMode.None))
+        {
+            if (dummy.GetComponentInParent<PlayerNetworkSetup>() != null || dummy.IsDead)
+            {
+                continue;
+            }
+
+            PlayerTeam dummyTeam = dummy.GetComponentInParent<PlayerTeam>();
+
+            if (dummyTeam != null && dummyTeam.team == throwerTeam)
+            {
+                continue;
+            }
+
+            float dummyDistance = Vector3.Distance(dummy.transform.position, position);
+
+            if (dummyDistance > radius)
+            {
+                continue;
+            }
+
+            float dummyDamage = maxDamage * (1f - dummyDistance / radius)
+                * BlastExposure(position, dummy.transform.position);
+
+            if (dummyDamage <= 0f)
+            {
+                continue;
+            }
+
+            bool dummyKilled = dummy.TakeDamage(dummyDamage);
+            ServerReportHit(dummyDamage, dummyKilled, false);
+        }
+
+        // The jolt carries well past the lethal radius — you feel a shell
+        // land near you long before it could have hurt you.
+        ServerApplyBlastShake(position, radius * 1.6f);
 
         if (TerrainDigManager.Instance != null)
         {
             TerrainDigManager.Instance.ServerAddCrater(position);
         }
 
+        if (FortificationManager.Instance != null)
+        {
+            FortificationManager.Instance.ServerDamageStructuresInRadius(position, radius, maxDamage, DamageType.Explosive, throwerTeam, this);
+        }
+
         // Incendiary leaves a burning patch: contact damage plus a burn
         // debuff that halves all healing.
-        if (grenadeType == GrenadeType.Incendiary)
+        if (grenadeType == GrenadeType.Incendiary && manager != null)
         {
-            StartCoroutine(ServerFireCreep(position, throwerTeam));
-            ObserversFireFx(position, fireCreepRadius, fireCreepDuration);
+            manager.RunPersistentEffect(ServerFireCreep(position, throwerTeam));
+            manager.ObserversWorldFireFx(position, fireCreepRadius, fireCreepDuration);
         }
     }
 
@@ -364,8 +810,17 @@ public class PlayerNetworkSetup : NetworkBehaviour
                     // leave, refreshed while you stay inside.
                     if (flat.magnitude <= fireCreepRadius)
                     {
-                        target.ServerIgnite(fireCreepDamagePerSecond, burnDebuffDuration);
+                        // Attributed to this player so the burn DOT's damage
+                        // still shows hit markers back on their screen.
+                        target.ServerIgnite(fireCreepDamagePerSecond, burnDebuffDuration,
+                            targetSetup == this ? null : this);
                     }
+                }
+
+                if (FortificationManager.Instance != null)
+                {
+                    FortificationManager.Instance.ServerDamageStructuresInRadius(
+                        position, fireCreepRadius, fireCreepDamagePerSecond * tick, DamageType.Fire, throwerTeam, this);
                 }
             }
 
@@ -373,17 +828,10 @@ public class PlayerNetworkSetup : NetworkBehaviour
         }
     }
 
-    [ObserversRpc]
-    private void ObserversFireFx(Vector3 position, float radius, float duration)
-    {
-        FireCreepFx.Spawn(position, radius, duration);
-    }
-
-    [ObserversRpc]
-    private void ObserversExplosionFx(Vector3 position, bool smoke)
-    {
-        ExplosionFx.Spawn(position, smoke);
-    }
+    // Explosion, fire and crate visuals deliberately live on
+    // FortificationManager instead of here — an RPC on this object cannot
+    // fire once the player has despawned, which is exactly when a grenade
+    // thrown just before dying needs to go off.
 
     // ---- Throwable supply crates (gadget slots) ----
     // Support's ammo crate and Medic's med kit are thrown like a grenade;
@@ -393,7 +841,7 @@ public class PlayerNetworkSetup : NetworkBehaviour
     private float serverNextCrateThrowTime;
 
     [ServerRpc]
-    public void RequestThrowSupplyCrate(Vector3 origin, Vector3 velocity, bool ammo)
+    public void RequestThrowSupplyCrate(Vector3 origin, Vector3 velocity, FortificationType crateType)
     {
         PlayerNetworkHealth health = GetComponent<PlayerNetworkHealth>();
 
@@ -402,8 +850,13 @@ public class PlayerNetworkSetup : NetworkBehaviour
             return;
         }
 
+        if (!FortificationManager.IsDeployableCrate(crateType))
+        {
+            return;
+        }
+
         // Only a player actually carrying that equipment can throw it.
-        EquipmentType required = ammo ? EquipmentType.AmmoCrate : EquipmentType.MedicalKit;
+        EquipmentType required = EquipmentForCrate(crateType);
 
         if (AssignedEquipment1 != required && AssignedEquipment2 != required)
         {
@@ -418,17 +871,45 @@ public class PlayerNetworkSetup : NetworkBehaviour
         serverNextCrateThrowTime = Time.time + 5f;
         velocity = Vector3.ClampMagnitude(velocity, 16f);
 
-        ObserversSpawnCrateVisual(origin, velocity);
-        StartCoroutine(ServerCrateLanding(origin, velocity, ammo));
+        // Hosted on the manager: a crate whose thrower despawns mid-flight
+        // would otherwise never finalise, leaving a registered, invisible
+        // crate dispensing supplies forever at its last airborne position.
+        FortificationManager manager = FortificationManager.Instance;
+
+        if (manager == null)
+        {
+            return;
+        }
+
+        manager.ObserversWorldCrateVisual(origin, velocity);
+        manager.RunPersistentEffect(ServerCrateLanding(origin, velocity, crateType));
     }
 
-    [ObserversRpc]
-    private void ObserversSpawnCrateVisual(Vector3 origin, Vector3 velocity)
+    // Which carried equipment lets you throw a given deployable.
+    public static EquipmentType EquipmentForCrate(FortificationType crateType)
     {
-        GrenadeVisual.Spawn(origin, velocity, true);
+        switch (crateType)
+        {
+            case FortificationType.AmmoCrate: return EquipmentType.AmmoCrate;
+            case FortificationType.Toolbox: return EquipmentType.Toolbox;
+            default: return EquipmentType.MedicalKit;
+        }
     }
 
-    private System.Collections.IEnumerator ServerCrateLanding(Vector3 position, Vector3 velocity, bool ammo)
+    // Which deployable a piece of equipment throws, if any.
+    public static FortificationType? CrateForEquipment(EquipmentType equipment)
+    {
+        switch (equipment)
+        {
+            case EquipmentType.AmmoCrate: return FortificationType.AmmoCrate;
+            case EquipmentType.MedicalKit: return FortificationType.MedCrate;
+            case EquipmentType.Toolbox: return FortificationType.Toolbox;
+            default: return null;
+        }
+    }
+
+
+    private System.Collections.IEnumerator ServerCrateLanding(Vector3 position, Vector3 velocity, FortificationType crateType)
     {
         FortificationManager manager = FortificationManager.Instance;
 
@@ -439,9 +920,7 @@ public class PlayerNetworkSetup : NetworkBehaviour
 
         // The crate starts dispensing the moment it leaves your hand; its
         // AOE follows the flying box.
-        int crateId = manager.ServerCreateThrownCrate(
-            ammo ? FortificationType.AmmoCrate : FortificationType.MedCrate,
-            position, AssignedTeam, OwnerId);
+        int crateId = manager.ServerCreateThrownCrate(crateType, position, AssignedTeam, OwnerId);
 
         if (crateId < 0)
         {
@@ -471,25 +950,8 @@ public class PlayerNetworkSetup : NetworkBehaviour
         spottedRemaining = spotDuration;
     }
 
-    [ObserversRpc]
-    private void ObserversFlareEffect(Vector3 landing)
-    {
-        GameObject flare = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        flare.name = "FlareEffect";
-        Destroy(flare.GetComponent<Collider>());
-        flare.transform.position = landing + Vector3.up * 0.4f;
-        flare.transform.localScale = Vector3.one * 0.35f;
-
-        Renderer flareRenderer = flare.GetComponent<Renderer>();
-        flareRenderer.material.color = Color.red;
-
-        Light flareLight = flare.AddComponent<Light>();
-        flareLight.color = new Color(1f, 0.25f, 0.15f);
-        flareLight.intensity = 4f;
-        flareLight.range = 18f;
-
-        Destroy(flare, spotDuration);
-    }
+    // The flare's own light and arc live in FlareVisual, spawned by the
+    // fortification manager so it outlives whoever fired it.
 
     private void OnGUI()
     {
@@ -670,7 +1132,90 @@ public class PlayerNetworkSetup : NetworkBehaviour
             if (bodyRenderer != null)
             {
                 bodyRenderer.material.color = team == Team.AlliedPowers ? alliedBodyColor : centralBodyColor;
+
+                if (boostEnemyContrast)
+                {
+                    StartCoroutine(ApplyEnemyContrastWhenReady(bodyRenderer.gameObject, team));
+                }
             }
+        }
+    }
+
+    // Waits until this client knows its OWN player's team (spawn order
+    // between local and remote players is not guaranteed), then boosts
+    // saturation/brightness on the target's renderers if — from THIS
+    // viewer's perspective — the target is an enemy. Purely a local visual
+    // tweak; never touches shared materials or replicated state.
+    private IEnumerator ApplyEnemyContrastWhenReady(GameObject visualRoot, Team targetTeam)
+    {
+        // Generous timeout: a joining client can sit on the class-select
+        // screen (still no owned player object) well after other players'
+        // models have already spawned in around them.
+        float timeoutAt = Time.time + 60f;
+        Team? localTeam = null;
+
+        while (localTeam == null && Time.time < timeoutAt)
+        {
+            localTeam = FindLocalViewerTeam();
+
+            if (localTeam == null)
+            {
+                yield return null;
+            }
+        }
+
+        if (localTeam == null || localTeam.Value == Team.Neutral || targetTeam == Team.Neutral
+            || localTeam.Value == targetTeam)
+        {
+            yield break;
+        }
+
+        BoostRendererContrast(visualRoot);
+    }
+
+    private static Team? FindLocalViewerTeam()
+    {
+        foreach (PlayerNetworkSetup setup in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+        {
+            if (setup.IsOwner)
+            {
+                return setup.AssignedTeam;
+            }
+        }
+
+        return null;
+    }
+
+    private void BoostRendererContrast(GameObject visualRoot)
+    {
+        foreach (Renderer renderer in visualRoot.GetComponentsInChildren<Renderer>(true))
+        {
+            Material[] materials = renderer.materials; // instantiates per-renderer copies
+
+            for (int i = 0; i < materials.Length; i++)
+            {
+                Material material = materials[i];
+
+                string colorProperty = material.HasProperty("_BaseColor") ? "_BaseColor"
+                    : material.HasProperty("_Color") ? "_Color" : null;
+
+                if (colorProperty == null)
+                {
+                    continue;
+                }
+
+                Color original = material.GetColor(colorProperty);
+                Color.RGBToHSV(original, out float hue, out float saturation, out float value);
+
+                saturation = Mathf.Clamp01(saturation * enemyContrastSaturationMultiplier + enemyContrastSaturationAdd);
+                value = Mathf.Clamp01(value * enemyContrastValueMultiplier + enemyContrastValueAdd);
+
+                Color boosted = Color.HSVToRGB(hue, saturation, value);
+                boosted.a = original.a;
+                material.SetColor(colorProperty, boosted);
+            }
+
+            renderer.materials = materials;
         }
     }
 
@@ -822,6 +1367,11 @@ public class PlayerNetworkSetup : NetworkBehaviour
         }
 
         soldierModelCreated = true;
+
+        if (boostEnemyContrast)
+        {
+            StartCoroutine(ApplyEnemyContrastWhenReady(clone, team));
+        }
     }
 
     private HealthComponent FindDummySource(Team team)
@@ -1022,9 +1572,12 @@ public class PlayerNetworkSetup : NetworkBehaviour
             gameObject.AddComponent<PlayerItemSlots>();
         }
 
+        // Shared by every damage source (melee, grenades, fire, structures).
+        hitMarkerUI = FindFirstObjectByType<HitMarkerUI>(FindObjectsInactive.Include);
+
         if (rifle != null)
         {
-            rifle.hitMarkerUI = FindFirstObjectByType<HitMarkerUI>(FindObjectsInactive.Include);
+            rifle.hitMarkerUI = hitMarkerUI;
 
             AmmoUI ammoUI = FindFirstObjectByType<AmmoUI>(FindObjectsInactive.Include);
             if (ammoUI != null)

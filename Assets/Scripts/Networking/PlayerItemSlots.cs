@@ -1,11 +1,16 @@
+using FishNet.Object;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
 // Owner-side item slots for a uniform FPS feel:
 //   1 — primary weapon (rifle)
 //   2 — grenade (LMB throws)
-//   3 — equipment slot 1 (LMB uses it if it has an active use)
-//   4 — equipment slot 2
+//   3 — Shovel: universal melee/dig tool, EVERY class gets this regardless
+//       of loadout. LMB swings (melee hit + digs if it lands on open
+//       ground); RMB holds to fill dirt back in.
+//   4 — class equipment (setup.AssignedEquipment1): Medic's Medical Kit,
+//       Support's Ammo Crate, everyone else defaults to the Axe — a
+//       melee-only tool with no dig/fill, built to wreck buildables.
 // Switching takes a short raise time during which nothing can be used. The
 // rifle only fires, aims, and reloads while slot 1 is active; other slots
 // show a simple held placeholder in hand.
@@ -52,6 +57,10 @@ public class PlayerItemSlots : MonoBehaviour
 
         if (health != null && health.State != PlayerLifeState.Alive)
         {
+            // Dying mid-cook has to clear the latch, or the next life would
+            // start believing a pin was already pulled.
+            cooking = false;
+
             if (activeSlot != 1)
             {
                 SwitchTo(1);
@@ -66,50 +75,37 @@ public class PlayerItemSlots : MonoBehaviour
             switchRemaining -= Time.deltaTime;
         }
 
-        if (GameSettings.Pressed(GameAction.Slot1)) SwitchTo(1);
-        if (GameSettings.Pressed(GameAction.Slot2)) SwitchTo(2);
-        if (GameSettings.Pressed(GameAction.Slot3)) SwitchTo(3);
-        if (GameSettings.Pressed(GameAction.Slot4)) SwitchTo(4);
+        // Clicks belong to the build menu while it is up, and a grenade whose
+        // pin is already out cannot be stowed.
+        if (FortificationBuilder.MenuOpen)
+        {
+            return;
+        }
 
-        if (switchRemaining <= 0f && Mouse.current.leftButton.wasPressedThisFrame)
+        if (!cooking)
+        {
+            if (GameSettings.Pressed(GameAction.Slot1)) SwitchTo(1);
+            if (GameSettings.Pressed(GameAction.Slot2)) SwitchTo(2);
+            if (GameSettings.Pressed(GameAction.Slot3)) SwitchTo(3);
+            if (GameSettings.Pressed(GameAction.Slot4)) SwitchTo(4);
+        }
+
+        if (switchRemaining <= 0f && activeSlot == 2)
+        {
+            HandleGrenadeInput();
+        }
+        else if (switchRemaining <= 0f && Mouse.current.leftButton.wasPressedThisFrame)
         {
             UseActiveItem();
         }
 
-        // Trench shovel held: LMB digs, RMB fills, continuously while held.
-        if (switchRemaining <= 0f && builder != null && ActiveEquipment() == EquipmentType.TrenchShovel)
+        // Shovel (slot 3): RMB holds to fill dirt back in. LMB's swing+dig
+        // is handled by UseActiveItem() above, on press rather than hold, so
+        // it reads as an attack rather than a continuous hose-down.
+        if (switchRemaining <= 0f && activeSlot == 3 && builder != null && Mouse.current.rightButton.isPressed)
         {
-            if (Mouse.current.leftButton.isPressed)
-            {
-                builder.TryDigScoop(false);
-            }
-            else if (Mouse.current.rightButton.isPressed)
-            {
-                builder.TryDigScoop(true);
-            }
+            builder.TryDigScoop(true);
         }
-    }
-
-    // The equipment in the active slot, or null-ish sentinel when a
-    // non-equipment slot is active.
-    private EquipmentType? ActiveEquipment()
-    {
-        if (setup == null)
-        {
-            return null;
-        }
-
-        if (activeSlot == 3)
-        {
-            return setup.AssignedEquipment1;
-        }
-
-        if (activeSlot == 4)
-        {
-            return setup.AssignedEquipment2;
-        }
-
-        return null;
     }
 
     private void SwitchTo(int slot)
@@ -219,38 +215,223 @@ public class PlayerItemSlots : MonoBehaviour
 
         switch (activeSlot)
         {
-            case 2:
-                if (setup.GrenadesLeft > 0 && playerCamera != null)
-                {
-                    Vector3 origin = playerCamera.transform.position + playerCamera.transform.forward * 0.4f;
-                    Vector3 velocity = playerCamera.transform.forward * 16f + Vector3.up * 3f;
-                    setup.RequestThrowGrenade(origin, velocity);
-                }
-
-                break;
-
             case 3:
-                UseEquipment(setup.AssignedEquipment1);
+                PerformMeleeSwing(DamageType.Shovel);
                 break;
 
             case 4:
-                UseEquipment(setup.AssignedEquipment2);
+                if (setup.AssignedEquipment1 == EquipmentType.Axe)
+                {
+                    PerformMeleeSwing(DamageType.Axe);
+                }
+                else
+                {
+                    UseEquipment(setup.AssignedEquipment1);
+                }
+
                 break;
         }
     }
 
+    // ---- Grenades: hold to pull the pin, release to throw ----
+    // One hold does two jobs at once — it winds up the throw AND burns the
+    // fuse. Holding longer throws further but leaves less fuse, and holding
+    // too long kills you, which is the whole tension of cooking one.
+
+    [Header("Grenade Throw")]
+    [Tooltip("Seconds of hold to reach a full-power throw. The fuse keeps burning well past this.")]
+    public float grenadeChargeTime = 0.9f;
+
+    public float minThrowSpeed = 9f;
+    public float maxThrowSpeed = 24f;
+    public float minThrowLift = 2f;
+    public float maxThrowLift = 4.5f;
+
+    private bool cooking;
+    private float cookStartTime;
+
+    private float CookedSeconds => cooking ? Time.time - cookStartTime : 0f;
+    private float Charge01 => Mathf.Clamp01(CookedSeconds / Mathf.Max(0.05f, grenadeChargeTime));
+
+    private void HandleGrenadeInput()
+    {
+        if (setup == null)
+        {
+            return;
+        }
+
+        if (!cooking)
+        {
+            if (Mouse.current.leftButton.wasPressedThisFrame && setup.GrenadesLeft > 0)
+            {
+                cooking = true;
+                cookStartTime = Time.time;
+                setup.RequestBeginCook();
+
+                // The pin is the player's only cue the fuse has started.
+                ProceduralAudio.PlayAt(ProceduralAudio.PinPull, playerCamera != null
+                    ? playerCamera.transform.position
+                    : transform.position, 0.7f);
+            }
+
+            return;
+        }
+
+        // The server owns the fuse and will have detonated it in-hand by now;
+        // just stop tracking locally.
+        if (CookedSeconds >= GrenadeArc.FuseSeconds)
+        {
+            cooking = false;
+            return;
+        }
+
+        if (Mouse.current.leftButton.wasReleasedThisFrame)
+        {
+            ThrowGrenade(Charge01);
+            cooking = false;
+        }
+    }
+
+    private void ThrowGrenade(float charge01)
+    {
+        if (playerCamera == null)
+        {
+            return;
+        }
+
+        Transform view = playerCamera.transform;
+        Vector3 origin = view.position + view.forward * 0.4f;
+        Vector3 velocity = view.forward * Mathf.Lerp(minThrowSpeed, maxThrowSpeed, charge01)
+            + Vector3.up * Mathf.Lerp(minThrowLift, maxThrowLift, charge01);
+
+        setup.RequestThrowGrenade(origin, velocity);
+    }
+
     private void UseEquipment(EquipmentType equipment)
     {
-        // Supply crates are thrown like grenades and land as active AOE
-        // boxes; other equipment is passive for now.
-        bool ammo = equipment == EquipmentType.AmmoCrate;
+        // Scout's flare gun: fires a flare that arcs up and drifts down,
+        // revealing enemies underneath it the whole way.
+        if (equipment == EquipmentType.FlareGun)
+        {
+            setup.TryFireFlare();
+            return;
+        }
 
-        if ((ammo || equipment == EquipmentType.MedicalKit) && playerCamera != null)
+        // Deployables (ammo box, med kit, toolbox) are thrown like grenades
+        // and land as active AOE boxes; other equipment is passive for now.
+        FortificationType? crateType = PlayerNetworkSetup.CrateForEquipment(equipment);
+
+        if (crateType != null && playerCamera != null)
         {
             Vector3 origin = playerCamera.transform.position + playerCamera.transform.forward * 0.4f;
             Vector3 velocity = playerCamera.transform.forward * 12f + Vector3.up * 2.5f;
-            setup.RequestThrowSupplyCrate(origin, velocity, ammo);
+            setup.RequestThrowSupplyCrate(origin, velocity, crateType.Value);
         }
+    }
+
+    // Local raycast for a melee swing: resolves whether it lands on a
+    // player, a structure, or open ground, then hands the result to the
+    // server for validation. A landing shovel swing on bare terrain also
+    // triggers one dig scoop (TryDigScoop paces/validates itself, so this
+    // never double-digs or digs through a structure).
+    private void PerformMeleeSwing(DamageType damageType)
+    {
+        if (setup == null || playerCamera == null)
+        {
+            return;
+        }
+
+        float range = damageType == DamageType.Axe ? setup.axeMeleeRange : setup.shovelMeleeRange;
+        Vector3 origin = playerCamera.transform.position;
+        Ray ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+        Vector3 hitPoint = origin + ray.direction * range;
+
+        NetworkObject targetObject = null;
+        int structureId = -1;
+
+        // Played locally off the client's own raycast so the swing lands on
+        // the ear at the same instant it lands on screen; waiting for the
+        // server to confirm would make every hit feel late.
+        ProceduralAudio.PlayAt(ProceduralAudio.Swing, origin, 0.45f);
+
+        if (Physics.Raycast(ray, out RaycastHit hit, range, Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+        {
+            hitPoint = hit.point;
+
+            FortificationStructure structure = hit.collider.GetComponentInParent<FortificationStructure>();
+
+            if (structure != null)
+            {
+                structureId = structure.id;
+                ProceduralAudio.PlayAt(ProceduralAudio.MeleeHard, hitPoint, 0.7f);
+            }
+            else
+            {
+                // Same resolution convention as the rifle's hitscan: hitbox
+                // colliders sit somewhere under the player's NetworkObject.
+                NetworkObject hitNetworkObject = hit.collider.GetComponentInParent<NetworkObject>();
+
+                if (hitNetworkObject != null && hitNetworkObject != setup.NetworkObject)
+                {
+                    targetObject = hitNetworkObject;
+                    ProceduralAudio.PlayAt(ProceduralAudio.MeleeFlesh, hitPoint, 0.8f);
+                }
+                else if (damageType == DamageType.Shovel && builder != null
+                    && hit.collider.GetComponent<TerrainCollider>() != null)
+                {
+                    builder.TryDigScoop(false);
+                }
+                else
+                {
+                    ProceduralAudio.PlayAt(ProceduralAudio.MeleeHard, hitPoint, 0.5f);
+                }
+            }
+        }
+
+        setup.RequestMeleeAttack(origin, hitPoint, targetObject, structureId, damageType);
+    }
+
+    // Throw power plus what is left of the fuse. The fuse bar runs red as it
+    // empties — cooking blind would just be a coin flip.
+    private void DrawGrenadeChargeBar()
+    {
+        if (!cooking)
+        {
+            return;
+        }
+
+        float barWidth = 220f;
+        float barHeight = 10f;
+        float x = (Screen.width - barWidth) * 0.5f;
+        float y = Screen.height * 0.66f;
+
+        float fuseLeft01 = Mathf.Clamp01(1f - CookedSeconds / GrenadeArc.FuseSeconds);
+
+        GUIStyle labelStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 12,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter
+        };
+        labelStyle.normal.textColor = Color.white;
+
+        GUI.Label(new Rect(0f, y - 20f, Screen.width, 18f),
+            "THROW POWER   —   FUSE " + (GrenadeArc.FuseSeconds - CookedSeconds).ToString("0.0") + "s", labelStyle);
+
+        // Power.
+        GUI.color = new Color(0f, 0f, 0f, 0.55f);
+        GUI.DrawTexture(new Rect(x - 2f, y - 2f, barWidth + 4f, barHeight + 4f), Texture2D.whiteTexture);
+        GUI.color = new Color(0.55f, 0.85f, 1f, 0.9f);
+        GUI.DrawTexture(new Rect(x, y, barWidth * Charge01, barHeight), Texture2D.whiteTexture);
+
+        // Fuse, directly beneath, draining the other way.
+        float fuseY = y + barHeight + 5f;
+        GUI.color = new Color(0f, 0f, 0f, 0.55f);
+        GUI.DrawTexture(new Rect(x - 2f, fuseY - 2f, barWidth + 4f, barHeight + 4f), Texture2D.whiteTexture);
+        GUI.color = Color.Lerp(new Color(1f, 0.2f, 0.15f, 0.95f), new Color(1f, 0.85f, 0.3f, 0.9f), fuseLeft01);
+        GUI.DrawTexture(new Rect(x, fuseY, barWidth * fuseLeft01, barHeight), Texture2D.whiteTexture);
+
+        GUI.color = Color.white;
     }
 
     // ---- HUD: slot list bottom-right ----
@@ -266,9 +447,11 @@ public class PlayerItemSlots : MonoBehaviour
         {
             "1  RIFLE",
             "2  " + LoadoutData.GetGrenadeName(setup.AssignedGrenade).ToUpper() + "  x" + setup.GrenadesLeft,
-            "3  " + LoadoutData.GetEquipmentName(setup.AssignedEquipment1).ToUpper(),
-            "4  " + LoadoutData.GetEquipmentName(setup.AssignedEquipment2).ToUpper()
+            "3  SHOVEL",
+            "4  " + LoadoutData.GetEquipmentName(setup.AssignedEquipment1).ToUpper()
         };
+
+        DrawGrenadeChargeBar();
 
         const float rowHeight = 20f;
         float x = Screen.width - 250f;

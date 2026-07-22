@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using FishNet.Connection;
 using FishNet.Object;
 using FishNet.Object.Synchronizing;
@@ -44,6 +45,20 @@ public class PlayerNetworkHealth : NetworkBehaviour
     public Color damageFlashColor = new Color(0.8f, 0.05f, 0.05f, 0.4f);
     public float damageFlashFadeTime = 0.45f;
 
+    [Tooltip("Ignore health drops smaller than this so replication jitter can never read as a hit.")]
+    public float damageFlashMinimum = 0.5f;
+
+    [Header("Heal Feedback")]
+    [Tooltip("Soft warm glow around the screen edges while healing. Should read as relief, not as a hit.")]
+    public Color healFlashColor = new Color(1f, 0.96f, 0.78f, 0.32f);
+
+    [Tooltip("Long enough that back-to-back heal ticks blend into one steady glow instead of strobing.")]
+    public float healFlashFadeTime = 1.2f;
+
+    [Header("Damage Direction")]
+    public float damageDirectionDuration = 1.6f;
+    public Color damageDirectionColor = new Color(1f, 0.25f, 0.2f, 0.9f);
+
     [Header("Downed Pose")]
     public Vector3 downedBodyLocalPosition = new Vector3(0f, 0.35f, 0f);
     public Vector3 downedBodyLocalEulerAngles = new Vector3(90f, 0f, 0f);
@@ -67,6 +82,11 @@ public class PlayerNetworkHealth : NetworkBehaviour
     private float serverSpawnProtectedUntil;
     private float ownerSpawnTime;
     private float damageFlashStrength;
+    private float healFlashStrength;
+
+    // Recent damage sources, for the directional indicators.
+    private readonly List<Vector3> damageDirections = new List<Vector3>();
+    private readonly List<float> damageDirectionTimes = new List<float>();
 
     public PlayerLifeState State => syncState.Value;
     public bool IsDowned => State == PlayerLifeState.Downed;
@@ -158,15 +178,145 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
     private void OnHealthSynced(float previous, float next, bool asServer)
     {
-        if (asServer)
+        if (asServer || !IsOwner)
         {
             return;
         }
 
-        if (IsOwner && next < previous)
+        // Thresholded so tiny replication deltas cannot masquerade as a hit
+        // and fire the red flash while you are actually being healed.
+        if (previous - next >= damageFlashMinimum)
         {
             damageFlashStrength = 1f;
         }
+        else if (next > previous)
+        {
+            healFlashStrength = 1f;
+
+            // Only real treatment gets a sound. The 1 HP/s passive regen
+            // would otherwise chime once a second, forever.
+            if (next - previous >= 2f)
+            {
+                ProceduralAudio.PlayAt(ProceduralAudio.HealTick, transform.position, 0.4f);
+            }
+        }
+    }
+
+    // Damage with a known origin, so the victim can be shown where it came
+    // from. Sources that have no meaningful position (bleedout, suicide)
+    // just call ServerTakeDamage directly.
+    public bool ServerTakeDamage(float damage, Vector3 sourcePosition)
+    {
+        bool killed = ServerTakeDamage(damage);
+
+        if (IsServerInitialized && Owner != null)
+        {
+            TargetDamageFrom(Owner, sourcePosition);
+        }
+
+        return killed;
+    }
+
+    [TargetRpc]
+    private void TargetDamageFrom(NetworkConnection connection, Vector3 sourcePosition)
+    {
+        damageDirections.Add(sourcePosition);
+        damageDirectionTimes.Add(Time.time);
+    }
+
+    // Radial falloff mask built once and stretched over the screen:
+    // transparent in the middle, solid at the edges. Generated rather than
+    // authored so no texture asset has to be imported and wired up.
+    private static Texture2D vignetteTexture;
+
+    private static Texture2D VignetteTexture()
+    {
+        if (vignetteTexture != null)
+        {
+            return vignetteTexture;
+        }
+
+        const int size = 64;
+        vignetteTexture = new Texture2D(size, size, TextureFormat.RGBA32, false)
+        {
+            wrapMode = TextureWrapMode.Clamp,
+            filterMode = FilterMode.Bilinear
+        };
+
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                // Distance from centre, 0 in the middle and 1 at the edges.
+                float nx = x / (size - 1f) * 2f - 1f;
+                float ny = y / (size - 1f) * 2f - 1f;
+                float distance = Mathf.Sqrt(nx * nx + ny * ny) / Mathf.Sqrt(2f);
+
+                // Nothing at all until well out from the centre, then a
+                // smooth ramp into the corners.
+                float alpha = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.42f, 1f, distance));
+                vignetteTexture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+            }
+        }
+
+        vignetteTexture.Apply();
+        return vignetteTexture;
+    }
+
+    // Red arcs around the crosshair pointing at whoever is hitting you.
+    private void DrawDamageDirections()
+    {
+        Camera camera = setup != null && setup.cameraRoot != null
+            ? setup.cameraRoot.GetComponentInChildren<Camera>()
+            : null;
+
+        for (int i = damageDirectionTimes.Count - 1; i >= 0; i--)
+        {
+            if (Time.time - damageDirectionTimes[i] > damageDirectionDuration)
+            {
+                damageDirectionTimes.RemoveAt(i);
+                damageDirections.RemoveAt(i);
+            }
+        }
+
+        if (camera == null || damageDirections.Count == 0)
+        {
+            return;
+        }
+
+        Vector2 center = new Vector2(GuiScale.Width * 0.5f, GuiScale.Height * 0.5f);
+        Matrix4x4 savedMatrix = GUI.matrix;
+
+        for (int i = 0; i < damageDirections.Count; i++)
+        {
+            Vector3 toSource = damageDirections[i] - transform.position;
+            toSource.y = 0f;
+
+            if (toSource.sqrMagnitude < 0.01f)
+            {
+                continue;
+            }
+
+            // Angle of the hit relative to where the player is facing, so the
+            // marker sits where they need to turn.
+            Vector3 forward = camera.transform.forward;
+            forward.y = 0f;
+
+            float angle = Vector3.SignedAngle(forward.normalized, toSource.normalized, Vector3.up);
+            float age01 = Mathf.Clamp01((Time.time - damageDirectionTimes[i]) / damageDirectionDuration);
+
+            Color color = damageDirectionColor;
+            color.a *= 1f - age01;
+
+            GUI.matrix = savedMatrix;
+            GUIUtility.RotateAroundPivot(angle, center);
+
+            GUI.color = color;
+            GUI.DrawTexture(new Rect(center.x - 26f, center.y - 108f, 52f, 9f), Texture2D.whiteTexture);
+        }
+
+        GUI.matrix = savedMatrix;
+        GUI.color = Color.white;
     }
 
     // Called by the rifle when the owner fires: shooting ends protection.
@@ -190,10 +340,15 @@ public class PlayerNetworkHealth : NetworkBehaviour
     private float serverBurnDps;
     private float burnDamageAccumulator;
 
-    public void ServerIgnite(float damagePerSecond, float duration)
+    // Who lit this player up, so the DOT's damage still reports hit markers
+    // to them. Null for self-inflicted burns.
+    private PlayerNetworkSetup serverBurnSource;
+
+    public void ServerIgnite(float damagePerSecond, float duration, PlayerNetworkSetup source = null)
     {
         serverBurnedUntil = Mathf.Max(serverBurnedUntil, Time.time + duration);
         serverBurnDps = Mathf.Max(serverBurnDps, damagePerSecond);
+        serverBurnSource = source;
     }
 
     [Header("Passive Regen")]
@@ -246,14 +401,22 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
                 if (burnDamageAccumulator >= serverBurnDps * 0.5f)
                 {
-                    ServerTakeDamage(burnDamageAccumulator);
+                    float burnTick = burnDamageAccumulator;
                     burnDamageAccumulator = 0f;
+
+                    bool killed = ServerTakeDamage(burnTick);
+
+                    if (serverBurnSource != null)
+                    {
+                        serverBurnSource.ServerReportHit(burnTick, killed, false);
+                    }
                 }
             }
             else if (Time.time >= serverBurnedUntil)
             {
                 serverBurnDps = 0f;
                 burnDamageAccumulator = 0f;
+                serverBurnSource = null;
             }
 
             ServerUpdate();
@@ -267,6 +430,12 @@ public class PlayerNetworkHealth : NetworkBehaviour
             {
                 damageFlashStrength = Mathf.MoveTowards(
                     damageFlashStrength, 0f, Time.deltaTime / Mathf.Max(0.05f, damageFlashFadeTime));
+            }
+
+            if (healFlashStrength > 0f)
+            {
+                healFlashStrength = Mathf.MoveTowards(
+                    healFlashStrength, 0f, Time.deltaTime / Mathf.Max(0.05f, healFlashFadeTime));
             }
         }
     }
@@ -543,6 +712,18 @@ public class PlayerNetworkHealth : NetworkBehaviour
 
         GuiScale.Begin();
 
+        // Healing reads as a warm glow around the EDGES only — the centre of
+        // the screen stays completely clear so it never sits between you and
+        // what you are aiming at.
+        if (healFlashStrength > 0f)
+        {
+            Color glow = healFlashColor;
+            glow.a *= healFlashStrength;
+            GUI.color = glow;
+            GUI.DrawTexture(new Rect(0f, 0f, GuiScale.Width, GuiScale.Height), VignetteTexture());
+            GUI.color = Color.white;
+        }
+
         if (damageFlashStrength > 0f)
         {
             Color flash = damageFlashColor;
@@ -552,6 +733,7 @@ public class PlayerNetworkHealth : NetworkBehaviour
             GUI.color = Color.white;
         }
 
+        DrawDamageDirections();
         DrawHealthBar();
 
         if (State == PlayerLifeState.Alive)
