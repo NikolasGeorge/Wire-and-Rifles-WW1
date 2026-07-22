@@ -528,7 +528,7 @@ public class ClassSelectHud : MonoBehaviour
             case 4:
                 EquipmentType other = id == 3 ? loadout.equipment2 : loadout.equipment1;
 
-                foreach (EquipmentType equipment in LoadoutData.AssaultEquipmentPool)
+                foreach (EquipmentType equipment in EquipmentPool())
                 {
                     if (equipment != other)
                     {
@@ -559,7 +559,7 @@ public class ClassSelectHud : MonoBehaviour
                 EquipmentType other = id == 3 ? loadout.equipment2 : loadout.equipment1;
                 int seen = 0;
 
-                foreach (EquipmentType equipment in LoadoutData.AssaultEquipmentPool)
+                foreach (EquipmentType equipment in EquipmentPool())
                 {
                     if (equipment == other)
                     {
@@ -589,6 +589,12 @@ public class ClassSelectHud : MonoBehaviour
         LoadoutData.Set(selectedClass, loadout);
     }
 
+    // The selected class's slot-4 options (empty when its kit is locked).
+    private EquipmentType[] EquipmentPool()
+    {
+        return LoadoutData.GetEquipmentPool(selectedClass) ?? System.Array.Empty<EquipmentType>();
+    }
+
     private void DrawLoadoutStrip(float y)
     {
         bool customizable = PlayerClasses.Get(selectedClass).customizableLoadout;
@@ -610,7 +616,10 @@ public class ClassSelectHud : MonoBehaviour
         DrawDropdownHeader(1, "WEAPON: " + WeaponProfiles.Get(weapons[loadout.weaponIndex]).displayName,
             weapons.Length > 1, buttonStyle);
         DrawDropdownHeader(2, "GRENADE: " + LoadoutData.GetGrenadeName(loadout.grenade), customizable, buttonStyle);
-        DrawDropdownHeader(3, LoadoutData.GetEquipmentName(loadout.equipment1), customizable, buttonStyle);
+        // Slot 4's tool is selectable whenever the class has a pool, even if
+        // the rest of its kit is locked (Engineer).
+        DrawDropdownHeader(3, LoadoutData.GetEquipmentName(loadout.equipment1),
+            EquipmentPool().Length > 0, buttonStyle);
         DrawDropdownHeader(4, LoadoutData.GetEquipmentName(loadout.equipment2), customizable, buttonStyle);
     }
 

@@ -14,6 +14,10 @@ public class PlayerController : NetworkBehaviour
     public float jumpHeight = 0.77f;
     public float gravity = -20f;
 
+    [Range(0f, 1f)]
+    [Tooltip("Horizontal move speed multiplier while airborne.")]
+    public float airControlMultiplier = 0.75f;
+
     [Header("Crouch")]
     [Range(0.3f, 0.9f)]
     public float crouchHeightMultiplier = 0.75f;
@@ -53,6 +57,12 @@ public class PlayerController : NetworkBehaviour
     public float LastSprintEndTime => lastSprintEndTime;
     public Vector2 CurrentMoveInput => currentMoveInput;
     private bool sprintToggled;
+    private PlayerSuppression suppression;
+
+    [Header("Debug")]
+    [Tooltip("F9 toggles a speedometer overlay for testing movement tuning.")]
+    public bool speedometerEnabled;
+    private float lastHorizontalSpeed;
 
     public bool SprintInputHeld => GameSettings.ToggleSprint ? sprintToggled : GameSettings.Held(GameAction.Sprint);
 
@@ -88,15 +98,47 @@ public class PlayerController : NetworkBehaviour
             return;
         }
 
-        // Pause menu owns the cursor and look while open; movement continues
-        // (the game does not stop in multiplayer).
-        if (!PauseMenu.IsOpen)
+        // Pause and build menus own the cursor and look while open; movement
+        // continues (the game does not stop in multiplayer). Without this the
+        // cursor re-locks the instant you click a build tile.
+        if (!PauseMenu.IsOpen && !FortificationBuilder.MenuOpen)
         {
             HandleLook();
             HandleCursor();
         }
 
         HandleMovement();
+
+        if (Keyboard.current.f9Key.wasPressedThisFrame)
+        {
+            speedometerEnabled = !speedometerEnabled;
+        }
+    }
+
+    // Testing overlay: horizontal speed (what walk/sprint/duckboard/air
+    // tuning actually changes), vertical speed, and ground state.
+    private void OnGUI()
+    {
+        if (!IsOwner || !speedometerEnabled)
+        {
+            return;
+        }
+
+        GuiScale.Begin();
+
+        GUIStyle style = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 20,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.UpperLeft
+        };
+        style.normal.textColor = Color.white;
+
+        string text = lastHorizontalSpeed.ToString("0.00") + " m/s"
+            + "\nvert " + verticalVelocity.y.ToString("0.00") + " m/s"
+            + "\n" + (IsGrounded ? "grounded" : "airborne");
+
+        GUI.Label(new Rect(16f, 16f, 260f, 90f), text, style);
     }
 
     private void HandleLook()
@@ -110,7 +152,16 @@ public class PlayerController : NetworkBehaviour
 
         if (playerCamera != null)
         {
-            playerCamera.transform.localRotation = Quaternion.Euler(pitch, 0f, 0f);
+            // Suppression shake is applied as an offset here, where the
+            // camera rotation is authored from scratch each frame, so it
+            // sways the actual aim without ever compounding.
+            if (suppression == null)
+            {
+                suppression = GetComponent<PlayerSuppression>();
+            }
+
+            Vector3 shake = suppression != null ? suppression.CameraShakeEuler : Vector3.zero;
+            playerCamera.transform.localRotation = Quaternion.Euler(pitch + shake.x, shake.y, shake.z);
         }
     }
 
@@ -183,7 +234,43 @@ public class PlayerController : NetworkBehaviour
             currentSpeed *= environmentSlowMultiplier;
         }
 
+        if (Time.time < environmentBoostUntil)
+        {
+            currentSpeed *= environmentBoostMultiplier;
+        }
+
+        // Airborne control is halved: you commit to a jump rather than
+        // steering through it. Applied to horizontal movement only, so the
+        // jump arc itself is untouched.
+        if (!grounded)
+        {
+            currentSpeed *= airControlMultiplier;
+        }
+
         Vector3 moveDirection = transform.right * moveInput.x + transform.forward * moveInput.y;
+
+        // On a ladder gravity is suspended: look up and walk forward to
+        // climb, look down to descend, jump to push off.
+        if (IsOnLadder && !GameSettings.Pressed(GameAction.Jump))
+        {
+            float climb = moveInput.y * -Mathf.Sin(pitch * Mathf.Deg2Rad);
+
+            // Holding forward while level with the ladder still creeps you
+            // up, so players never get stuck partway.
+            if (moveInput.y > 0f && Mathf.Abs(climb) < 0.2f)
+            {
+                climb = 0.2f;
+            }
+
+            verticalVelocity.y = climb * climbSpeed;
+
+            Vector3 ladderMovement = moveDirection * (currentSpeed * 0.4f);
+            ladderMovement.y = verticalVelocity.y;
+
+            characterController.Move(ladderMovement * Time.deltaTime);
+            lastHorizontalSpeed = new Vector3(ladderMovement.x, 0f, ladderMovement.z).magnitude;
+            return;
+        }
 
         if (grounded && !isCrouching && GameSettings.Pressed(GameAction.Jump))
         {
@@ -196,6 +283,7 @@ public class PlayerController : NetworkBehaviour
         finalMovement.y = verticalVelocity.y;
 
         characterController.Move(finalMovement * Time.deltaTime);
+        lastHorizontalSpeed = new Vector3(finalMovement.x, 0f, finalMovement.z).magnitude;
     }
 
     // Hold Ctrl to crouch: shorter capsule, lower camera, slower movement,
@@ -263,6 +351,31 @@ public class PlayerController : NetworkBehaviour
         environmentSlowMultiplier = Mathf.Clamp01(multiplier);
         environmentSlowUntil = Time.time + duration;
     }
+
+    // Kept separate from the slow so wire and duck boards can apply at once
+    // and multiply out, rather than one silently overwriting the other.
+    private float environmentBoostMultiplier = 1f;
+    private float environmentBoostUntil;
+
+    public void ApplyEnvironmentSpeedBoost(float multiplier, float duration = 0.25f)
+    {
+        environmentBoostMultiplier = Mathf.Max(1f, multiplier);
+        environmentBoostUntil = Time.time + duration;
+    }
+
+    [Header("Ladders")]
+    public float climbSpeed = 3f;
+
+    // Refreshed every frame the player is inside a ladder's climb volume;
+    // expires on its own so stepping off a ladder needs no exit event.
+    private float onLadderUntil;
+
+    public void SetOnLadder()
+    {
+        onLadderUntil = Time.time + 0.2f;
+    }
+
+    public bool IsOnLadder => Time.time < onLadderUntil;
 
     public void AddCameraRecoil(float pitchKick, float yawKick)
     {

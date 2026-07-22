@@ -32,8 +32,6 @@ public class TerrainDigManager : NetworkBehaviour
 
     [Header("Dig Rules")]
     public float maxDigDistance = 4f;
-    [Tooltip("No digging within this range of any placed structure.")]
-    public float structureClearance = 2f;
     [Tooltip("Seconds between scoops at 1x dig speed.")]
     public float scoopInterval = 0.8f;
 
@@ -187,30 +185,10 @@ public class TerrainDigManager : NetworkBehaviour
 
     public bool DiggingAvailable => terrain != null;
 
-    // Shared placement rule: no digging near structures (protects wire and
-    // sandbag foundations), checked on both client (for the hint) and server.
-    public static bool BlockedByStructure(Vector3 point, float clearance)
-    {
-        foreach (FortificationStructure structure in FindObjectsByType<FortificationStructure>(FindObjectsSortMode.None))
-        {
-            // Supply crates don't restrict digging — only defensive
-            // structures (wire, sandbags, walls) protect their footing.
-            if (structure.type == FortificationType.AmmoCrate || structure.type == FortificationType.MedCrate)
-            {
-                continue;
-            }
-
-            Vector3 flat = structure.transform.position - point;
-            flat.y = 0f;
-
-            if (flat.magnitude <= clearance)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    // Digging next to player-made structures is allowed: structures settle
+    // into whatever ground ends up beneath them (see
+    // FortificationStructure's terrain adaptation), so undermining one just
+    // lowers it rather than leaving it floating.
 
     // ---- Server ----
 
@@ -231,11 +209,6 @@ public class TerrainDigManager : NetworkBehaviour
         }
 
         if (Vector3.Distance(sender.FirstObject.transform.position, point) > maxDigDistance + 2f)
-        {
-            return;
-        }
-
-        if (BlockedByStructure(point, structureClearance))
         {
             return;
         }

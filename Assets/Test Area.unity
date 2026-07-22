@@ -11117,15 +11117,19 @@ MonoBehaviour:
   maxSameTypeStack: 2
   stackCheckRadius: 1.5
   startingSupplies: 60
-  suppliesPerTick: 5
-  supplyTickInterval: 30
+  suppliesPerTick: 10
+  supplyTickInterval: 10
   suppliesCap: 300
   buildInteractRange: 4.5
   wireDamagePerSecond: 15
+  wireEntrySpeedCap: 3
   crateEffectRadius: 3.5
   crateEffectInterval: 2
   ammoPerTick: 5
   healPerTick: 10
+  medHealPerTick: 4
+  toolboxWorkMultiplier: 2
+  toolboxAutoRepairPerSecond: 0.01
 --- !u!114 &1900000006
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -11141,11 +11145,10 @@ MonoBehaviour:
   _componentIndexCache: 255
   _addedNetworkObject: {fileID: 1900000004}
   _networkObjectCache: {fileID: 0}
-  maxDigDepth: 0.9
-  digRadius: 1.5
+  maxDigDepth: 1
+  digRadius: 0.01
   depthPerScoop: 0.15
-  maxDigDistance: 4
-  structureClearance: 2
+  maxDigDistance: 2
   scoopInterval: 0.5
 --- !u!114 &1900000010
 MonoBehaviour:

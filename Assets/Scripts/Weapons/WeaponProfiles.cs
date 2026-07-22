@@ -65,6 +65,10 @@ public struct WeaponProfile
     public float deploySetupTime;
     public bool useRapidFirePenalty;
 
+    // Scales how hard this weapon's near-misses suppress, on top of the
+    // damage weighting. Left unset (0) it is treated as 1.
+    public float suppressionMultiplier;
+
     public float hipRecoilMultiplier;
     public float aimRecoilMultiplier;
     public float cameraPitchKick;
@@ -186,10 +190,11 @@ public static class WeaponProfiles
                 {
                     displayName = "LMG",
                     fireMode = WeaponFireMode.Automatic,
-                    // 2-shot down close, 3-shot mid, 4-shot long.
-                    damageClose = 50f,
-                    damageMid = 40f,
-                    damageLong = 30f,
+                    // Low per-shot damage: the LMG's value is volume of fire
+                    // and the suppression it creates, not raw lethality.
+                    damageClose = 35f,
+                    damageMid = 28f,
+                    damageLong = 21f,
                     closeRangeEnd = 50f,
                     midRangeEnd = 100f,
                     range = 120f,

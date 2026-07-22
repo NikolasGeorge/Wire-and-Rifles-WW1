@@ -12,7 +12,14 @@ public enum FortificationType : byte
     HighWire = 2,
     TrenchWall = 3,
     AmmoCrate = 4,
-    MedCrate = 5
+    MedCrate = 5,
+    Toolbox = 6,
+
+    // Trench furniture: walkable and climbable pieces rather than cover.
+    DuckBoards = 7,
+    CorrugatedRoof = 8,
+    Ladder = 9,
+    MakeshiftFloor = 10
 }
 
 // Server-authoritative blueprint/build system (Engineer class notes):
@@ -34,6 +41,11 @@ public class FortificationManager : NetworkBehaviour
     [Tooltip("Lenient by design — players are allowed to build creatively on slopes; the structure stays upright regardless.")]
     public float maxGroundAngle = 50f;
 
+    // Edge length of one makeshift floor tile. Drives both its collider and
+    // the side-by-side snapping grid, so if the prop's footprint is not
+    // square-2m this is the single value to correct.
+    public const float MakeshiftFloorTileSize = 2f;
+
     [Tooltip("Max structures of the SAME type allowed within stacking range of each other (1 on the ground + 1 on top).")]
     public int maxSameTypeStack = 2;
     public float stackCheckRadius = 1.5f;
@@ -54,9 +66,13 @@ public class FortificationManager : NetworkBehaviour
     [Header("Team Supplies")]
     [Tooltip("Each team's build pool at round start. Placing costs supplies; the pool grows over time.")]
     public int startingSupplies = 60;
-    public int suppliesPerTick = 5;
-    public float supplyTickInterval = 30f;
+    public int suppliesPerTick = 10;
+    public float supplyTickInterval = 10f;
     public int suppliesCap = 300;
+
+    // Income rate for the build menu header.
+    public float SuppliesPerMinute =>
+        supplyTickInterval <= 0f ? 0f : suppliesPerTick * (60f / supplyTickInterval);
 
     // Per-team build resources, server-written.
     private readonly SyncVar<int> syncAlliedSupplies = new SyncVar<int>();
@@ -68,15 +84,39 @@ public class FortificationManager : NetworkBehaviour
         return team == Team.CentralPowers ? syncCentralSupplies.Value : syncAlliedSupplies.Value;
     }
 
+    // Pieces whose whole point is sitting where the player put them, rather
+    // than on the ground: they neither snap down on placement nor settle
+    // with the terrain afterwards.
+    public static bool KeepsPlacedHeight(FortificationType type)
+    {
+        return type == FortificationType.MakeshiftFloor
+            || type == FortificationType.CorrugatedRoof;
+    }
+
+    // Thrown deployables (ammo/med/toolbox): no collision, no blueprint
+    // stage, one active per player per type, AOE effect while placed.
+    public static bool IsDeployableCrate(FortificationType type)
+    {
+        return type == FortificationType.AmmoCrate
+            || type == FortificationType.MedCrate
+            || type == FortificationType.Toolbox;
+    }
+
     public static int GetCost(FortificationType type)
     {
         switch (type)
         {
             case FortificationType.LowWire: return 8;
             case FortificationType.HighWire: return 12;
-            case FortificationType.TrenchWall: return 30;
+            // A full sandbag wall is three times the work of a sandbag stack.
+            case FortificationType.TrenchWall: return 90;
             case FortificationType.AmmoCrate: return 5;
             case FortificationType.MedCrate: return 5;
+            case FortificationType.Toolbox: return 5;
+            case FortificationType.DuckBoards: return 6;
+            case FortificationType.CorrugatedRoof: return 10;
+            case FortificationType.Ladder: return 6;
+            case FortificationType.MakeshiftFloor: return 8;
             default: return 10;
         }
     }
@@ -104,6 +144,15 @@ public class FortificationManager : NetworkBehaviour
     public float medHealPerTick = 4f;
     private float medEffectTimer;
 
+    [Header("Toolbox (Engineer)")]
+    [Tooltip("Build/repair speed multiplier for work done inside a friendly toolbox's radius.")]
+    public float toolboxWorkMultiplier = 2f;
+
+    [Tooltip("Fraction of a structure's max health auto-repaired per second by a nearby friendly toolbox.")]
+    public float toolboxAutoRepairPerSecond = 0.01f;
+
+    private float toolboxRepairTimer;
+
     public static string GetDisplayName(FortificationType type)
     {
         switch (type)
@@ -113,6 +162,11 @@ public class FortificationManager : NetworkBehaviour
             case FortificationType.TrenchWall: return "Trench Wall";
             case FortificationType.AmmoCrate: return "Ammo Box";
             case FortificationType.MedCrate: return "Med Box";
+            case FortificationType.Toolbox: return "Toolbox";
+            case FortificationType.DuckBoards: return "Duck Boards";
+            case FortificationType.CorrugatedRoof: return "Corrugated Roof";
+            case FortificationType.Ladder: return "Ladder";
+            case FortificationType.MakeshiftFloor: return "Makeshift Floor";
             default: return "Sandbags";
         }
     }
@@ -124,9 +178,15 @@ public class FortificationManager : NetworkBehaviour
         {
             case FortificationType.LowWire: return 15f;
             case FortificationType.HighWire: return 25f;
+            // Three times a sandbag stack's 20s, matching its tripled cost.
             case FortificationType.TrenchWall: return 60f;
             case FortificationType.AmmoCrate: return 10f;
             case FortificationType.MedCrate: return 10f;
+            case FortificationType.Toolbox: return 10f;
+            case FortificationType.DuckBoards: return 8f;
+            case FortificationType.CorrugatedRoof: return 14f;
+            case FortificationType.Ladder: return 8f;
+            case FortificationType.MakeshiftFloor: return 10f;
             default: return 20f;
         }
     }
@@ -141,6 +201,13 @@ public class FortificationManager : NetworkBehaviour
             case FortificationType.TrenchWall: return 20000f;
             case FortificationType.AmmoCrate: return 500f;
             case FortificationType.MedCrate: return 500f;
+            case FortificationType.Toolbox: return 500f;
+            // Trench furniture is timber and sheet metal, not cover — it
+            // gives way far sooner than a sandbag line.
+            case FortificationType.DuckBoards: return 1500f;
+            case FortificationType.CorrugatedRoof: return 2000f;
+            case FortificationType.Ladder: return 1200f;
+            case FortificationType.MakeshiftFloor: return 1800f;
             default: return 10000f;
         }
     }
@@ -163,6 +230,10 @@ public class FortificationManager : NetworkBehaviour
         // structure to the same height.
         public float terrainOffset;
 
+        // Highest 25% build checkpoint banked so far (0, .25, .5, .75).
+        // Progress is never allowed to drop below this.
+        public float buildCheckpoint;
+
         public bool Complete => progress >= 1f;
     }
 
@@ -178,6 +249,17 @@ public class FortificationManager : NetworkBehaviour
     private void Awake()
     {
         Instance = this;
+    }
+
+    // Without this a torn-down manager stays the live Instance across a
+    // scene reload, and every world effect silently routes into a destroyed
+    // object.
+    private void OnDestroy()
+    {
+        if (Instance == this)
+        {
+            Instance = null;
+        }
     }
 
     public override void OnStartServer()
@@ -246,29 +328,24 @@ public class FortificationManager : NetworkBehaviour
 
         // Ground snap + slope check: structures stay upright (yaw only) and
         // refuse terrain that is too steep, instead of tilting.
-        if (Physics.Raycast(position + Vector3.up * 2f, Vector3.down, out RaycastHit groundHit, 10f,
+        //
+        // Deliberately skipped for pieces that are placed AT A HEIGHT: a
+        // floor snapped level with its neighbour, or a roof lined up
+        // overhead, would otherwise be dragged straight back down to the
+        // dirt and lose the alignment the player just made.
+        if (!KeepsPlacedHeight(type)
+            && Physics.Raycast(position + Vector3.up * 2f, Vector3.down, out RaycastHit groundHit, 10f,
             Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
         {
-            // Structures normally sit on terrain. Stacking is allowed only
-            // onto a COMPLETED structure of the same type whose stack limit
-            // is above 1 (sandbags/walls, never wire) — the count check
-            // below caps how high the pile can go.
-            FortificationStructure supporting = groundHit.collider.GetComponentInParent<FortificationStructure>();
+            // Anything solid is a foundation — terrain or another structure
+            // alike. Blueprints cannot be built on because their colliders
+            // stay off until they are finished, so the ray passes through
+            // them and finds the ground beneath.
+            bool onStructure = groundHit.collider.GetComponentInParent<FortificationStructure>() != null;
 
-            if (supporting != null)
-            {
-                bool stackable = supporting.type == type
-                    && supporting.complete
-                    && GetStackLimit(type, maxSameTypeStack) > 1;
-
-                if (!stackable)
-                {
-                    Debug.Log("[Fortifications] Place rejected: cannot place on another structure.");
-                    return;
-                }
-            }
-
-            if (Vector3.Angle(groundHit.normal, Vector3.up) > maxGroundAngle)
+            // The slope rule is about refusing to perch things on a cliff
+            // face; a structure's own top face is flat by definition.
+            if (!onStructure && Vector3.Angle(groundHit.normal, Vector3.up) > maxGroundAngle)
             {
                 Debug.Log("[Fortifications] Place rejected: ground too steep.");
                 return;
@@ -305,7 +382,7 @@ public class FortificationManager : NetworkBehaviour
         }
 
         // Crates: one active per player — placing a new one replaces the old.
-        if (type == FortificationType.AmmoCrate || type == FortificationType.MedCrate)
+        if (IsDeployableCrate(type))
         {
             for (int i = serverStructures.Count - 1; i >= 0; i--)
             {
@@ -381,6 +458,8 @@ public class FortificationManager : NetworkBehaviour
                 return playerClass == PlayerClass.Support;
             case FortificationType.MedCrate:
                 return playerClass == PlayerClass.Medic;
+            case FortificationType.Toolbox:
+                return playerClass == PlayerClass.Engineer;
             default:
                 // Structures and wire are Engineer identity.
                 return PlayerClasses.Get(playerClass).buildDigMultiplier > 1f;
@@ -453,6 +532,14 @@ public class FortificationManager : NetworkBehaviour
             ApplyCrateEffects(false);
         }
 
+        toolboxRepairTimer += Time.deltaTime;
+
+        if (toolboxRepairTimer >= 0.5f)
+        {
+            ApplyToolboxAutoRepair(toolboxRepairTimer);
+            toolboxRepairTimer = 0f;
+        }
+
         syncTimer += Time.deltaTime;
 
         if (syncTimer >= 0.4f)
@@ -493,14 +580,26 @@ public class FortificationManager : NetworkBehaviour
                 continue;
             }
 
-            float multiplier = Mathf.Max(1f, PlayerClasses.Get(FindPlayerByClientId(entry.Key).AssignedClass).buildDigMultiplier);
+            float multiplier = Mathf.Max(1f, PlayerClasses.Get(builder.AssignedClass).buildDigMultiplier);
+
+            // A friendly toolbox in range doubles build and repair speed.
+            if (HasToolboxCoverage(record.position, record.team))
+            {
+                multiplier *= toolboxWorkMultiplier;
+            }
+
             float buildTime = GetBuildTime(record.type);
             float maxHealth = GetMaxHealth(record.type);
 
             if (!record.Complete)
             {
                 bool wasComplete = record.Complete;
-                record.progress = Mathf.Clamp01(record.progress + multiplier * deltaTime / buildTime);
+                // Banked quarters: once a 25/50/75% checkpoint is reached the
+                // structure can never fall back below it, so partial work is
+                // never wasted.
+                record.progress = Mathf.Clamp(record.progress + multiplier * deltaTime / buildTime,
+                    record.buildCheckpoint, 1f);
+                record.buildCheckpoint = Mathf.Min(0.75f, Mathf.Floor(record.progress * 4f) * 0.25f);
                 record.health = record.progress * maxHealth;
                 record.dirty = true;
 
@@ -534,7 +633,7 @@ public class FortificationManager : NetworkBehaviour
     // crate of each type per player; a new throw replaces it.
     public int ServerCreateThrownCrate(FortificationType type, Vector3 position, Team team, int placerClientId)
     {
-        if (!IsServerStarted || (type != FortificationType.AmmoCrate && type != FortificationType.MedCrate))
+        if (!IsServerStarted || !IsDeployableCrate(type))
         {
             return -1;
         }
@@ -625,33 +724,104 @@ public class FortificationManager : NetworkBehaviour
 
     // ---- Structure damage ----
 
+    // How much of a hit actually lands, by structure type and damage source.
+    // Only Sandbags has tuned numbers so far; everything else stays neutral
+    // (100%, matching pre-damage-type behavior) until specified.
+    public static float GetDamageMultiplier(FortificationType type, DamageType damageType)
+    {
+        if (type == FortificationType.Sandbags)
+        {
+            switch (damageType)
+            {
+                case DamageType.Bullet: return 0.5f;
+                case DamageType.Explosive: return 1.25f;
+                case DamageType.Axe: return 2f;
+                case DamageType.Shovel: return 0.75f;
+                case DamageType.Fire: return 1f;
+            }
+        }
+
+        return 1f;
+    }
+
+    // Bullets: client raycasts, reports the hit, server re-validates the
+    // shooter/target here (sender is auto-filled by FishNet from the RPC).
     [ServerRpc(RequireOwnership = false)]
-    public void ReportStructureDamage(int structureId, float damage, NetworkConnection sender = null)
+    public void ReportStructureDamage(int structureId, float damage, DamageType damageType, NetworkConnection sender = null)
     {
         if (sender == null || sender.FirstObject == null)
         {
             return;
         }
 
-        StructureRecord record = FindRecord(structureId);
-
-        // Blueprints cannot be damaged (first-version rule).
-        if (record == null || !record.Complete)
-        {
-            return;
-        }
-
         PlayerNetworkSetup shooter = sender.FirstObject.GetComponent<PlayerNetworkSetup>();
 
-        if (shooter == null || shooter.AssignedTeam == record.team)
+        if (shooter == null)
         {
             return;
         }
 
-        // Small arms deal reduced structure damage.
-        float structureDamage = Mathf.Clamp(damage, 0f, 300f);
+        ApplyStructureDamage(FindRecord(structureId), damage, damageType, shooter.AssignedTeam, shooter);
+    }
+
+    // Grenades and fire creep already run server-side (no client to validate
+    // against), so they call straight through instead of going via a ServerRpc.
+    public void ServerDamageStructuresInRadius(Vector3 position, float radius, float maxDamage, DamageType damageType,
+        Team attackerTeam, PlayerNetworkSetup attacker = null)
+    {
+        if (radius <= 0f)
+        {
+            return;
+        }
+
+        // Copy first: ApplyStructureDamage can remove entries from
+        // serverStructures mid-iteration when a hit destroys a structure.
+        foreach (StructureRecord record in new List<StructureRecord>(serverStructures))
+        {
+            float distance = Vector3.Distance(record.position, position);
+
+            if (distance > radius)
+            {
+                continue;
+            }
+
+            float falloffDamage = maxDamage * (1f - distance / radius);
+            ApplyStructureDamage(record, falloffDamage, damageType, attackerTeam, attacker);
+        }
+    }
+
+    // Melee: PlayerNetworkSetup's ServerRpc already validated range/cooldown
+    // with the swinger's own authority, so this is a direct server call.
+    public void ServerDamageStructureDirect(int structureId, float damage, DamageType damageType,
+        Team attackerTeam, PlayerNetworkSetup attacker = null)
+    {
+        ApplyStructureDamage(FindRecord(structureId), damage, damageType, attackerTeam, attacker);
+    }
+
+    private void ApplyStructureDamage(StructureRecord record, float damage, DamageType damageType,
+        Team attackerTeam, PlayerNetworkSetup attacker)
+    {
+        // Blueprints cannot be damaged (first-version rule).
+        if (record == null || !record.Complete || attackerTeam == record.team)
+        {
+            return;
+        }
+
+        // Upper bound is only an anti-cheat guard on client-reported bullet
+        // damage; it must stay well clear of a legitimate axe swing.
+        float multiplier = GetDamageMultiplier(record.type, damageType);
+        float structureDamage = Mathf.Clamp(damage * multiplier, 0f, 2000f);
         record.health -= structureDamage;
         record.dirty = true;
+
+        // Hit marker on the attacker's screen, showing the damage that
+        // actually landed after the structure's resistance. Destroying a
+        // structure is not flagged as a "kill" — that marker and its sound
+        // mean an eliminated player.
+        if (attacker != null)
+        {
+            attacker.ServerReportHit(structureDamage, false, false);
+        }
 
         if (record.health <= 0f)
         {
@@ -757,6 +927,66 @@ public class FortificationManager : NetworkBehaviour
 
         playersInWirePreviousTick.Clear();
         playersInWirePreviousTick.UnionWith(playersInWireCurrentTick);
+    }
+
+    // True when a completed friendly toolbox covers this position.
+    private bool HasToolboxCoverage(Vector3 position, Team team)
+    {
+        foreach (StructureRecord record in serverStructures)
+        {
+            if (record.Complete && record.type == FortificationType.Toolbox && record.team == team
+                && Vector3.Distance(SettledPosition(record), position) <= crateEffectRadius)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Toolboxes slowly mend friendly structures around them with no player
+    // input — the Engineer's "set and forget" area denial support.
+    private void ApplyToolboxAutoRepair(float deltaTime)
+    {
+        List<StructureRecord> toolboxes = null;
+
+        foreach (StructureRecord record in serverStructures)
+        {
+            if (record.Complete && record.type == FortificationType.Toolbox)
+            {
+                (toolboxes ??= new List<StructureRecord>()).Add(record);
+            }
+        }
+
+        if (toolboxes == null)
+        {
+            return;
+        }
+
+        foreach (StructureRecord record in serverStructures)
+        {
+            float maxHealth = GetMaxHealth(record.type);
+
+            // Only completed structures are repaired; blueprints still need
+            // a player with a shovel to finish them.
+            if (!record.Complete || record.health >= maxHealth)
+            {
+                continue;
+            }
+
+            foreach (StructureRecord toolbox in toolboxes)
+            {
+                if (toolbox == record || toolbox.team != record.team
+                    || Vector3.Distance(SettledPosition(toolbox), SettledPosition(record)) > crateEffectRadius)
+                {
+                    continue;
+                }
+
+                record.health = Mathf.Min(maxHealth, record.health + maxHealth * toolboxAutoRepairPerSecond * deltaTime);
+                record.dirty = true;
+                break;
+            }
+        }
     }
 
     // Med crates tick on their own faster clock (2x rate, half heal per
@@ -890,6 +1120,114 @@ public class FortificationManager : NetworkBehaviour
         }
     }
 
+    // ---- Persistent world effects ----
+    // Players are DESPAWNED on death (PlayerNetworkHealth.ServerRespawn), so
+    // anything hosted on a player object dies with them: a grenade thrown a
+    // second before dying never detonated, a lit fire patch stopped early,
+    // and a supply crate still in the air was left registered and dispensing
+    // forever with no visual. This manager is a scene object that never
+    // despawns, so world effects outlive whoever started them.
+
+    public Coroutine RunPersistentEffect(System.Collections.IEnumerator routine)
+    {
+        return routine == null ? null : StartCoroutine(routine);
+    }
+
+    [ObserversRpc]
+    public void ObserversWorldGrenadeVisual(Vector3 origin, Vector3 velocity, GrenadeType grenadeType, float fuseSeconds)
+    {
+        GrenadeVisual.Spawn(origin, velocity, false, grenadeType, fuseSeconds);
+    }
+
+    [ObserversRpc]
+    public void ObserversWorldCrateVisual(Vector3 origin, Vector3 velocity)
+    {
+        GrenadeVisual.Spawn(origin, velocity, true);
+    }
+
+    [ObserversRpc]
+    public void ObserversWorldExplosionFx(Vector3 position, bool smoke)
+    {
+        ExplosionFx.Spawn(position, smoke);
+    }
+
+    [ObserversRpc]
+    private void ObserversWorldFlareVisual(Vector3 origin, Vector3 velocity, float burnSeconds)
+    {
+        FlareVisual.Spawn(origin, velocity, burnSeconds);
+    }
+
+    // A burning flare that keeps revealing enemies underneath it for as long
+    // as it hangs, rather than spotting once and going out. Hosted here so a
+    // Scout who is killed still lights the ground they fired over.
+    public void ServerRunFlare(Vector3 origin, Vector3 velocity, Team spottingTeam,
+        float burnSeconds, float radius)
+    {
+        if (!IsServerStarted)
+        {
+            return;
+        }
+
+        ObserversWorldFlareVisual(origin, velocity, burnSeconds);
+        RunPersistentEffect(ServerFlareRoutine(origin, velocity, spottingTeam, burnSeconds, radius));
+    }
+
+    private System.Collections.IEnumerator ServerFlareRoutine(Vector3 position, Vector3 velocity,
+        Team spottingTeam, float burnSeconds, float radius)
+    {
+        float elapsed = 0f;
+        float spotTimer = 0f;
+        bool resting = false;
+
+        while (elapsed < burnSeconds)
+        {
+            float deltaTime = Mathf.Min(Time.deltaTime, 0.05f);
+
+            if (!resting)
+            {
+                resting = FlareArc.Step(ref position, ref velocity, deltaTime);
+            }
+
+            elapsed += deltaTime;
+            spotTimer += deltaTime;
+
+            // Re-spotting on a cadence keeps anyone who walks underneath
+            // lit, instead of only whoever happened to be there at launch.
+            if (spotTimer >= 0.5f)
+            {
+                spotTimer = 0f;
+
+                foreach (PlayerNetworkSetup target in FindObjectsByType<PlayerNetworkSetup>(FindObjectsSortMode.None))
+                {
+                    if (target.AssignedTeam == spottingTeam || target.AssignedTeam == Team.Neutral)
+                    {
+                        continue;
+                    }
+
+                    PlayerNetworkHealth targetHealth = target.GetComponent<PlayerNetworkHealth>();
+
+                    if (targetHealth != null && targetHealth.IsDead)
+                    {
+                        continue;
+                    }
+
+                    if (Vector3.Distance(target.transform.position, position) <= radius)
+                    {
+                        target.ServerApplySpotted(spottingTeam);
+                    }
+                }
+            }
+
+            yield return null;
+        }
+    }
+
+    [ObserversRpc]
+    public void ObserversWorldFireFx(Vector3 position, float radius, float duration)
+    {
+        FireCreepFx.Spawn(position, radius, duration);
+    }
+
     // ---- Client-side visuals ----
 
     private void CreateClientStructure(int id, FortificationType type, Team team, Vector3 position, float yaw,
@@ -903,17 +1241,6 @@ public class FortificationManager : NetworkBehaviour
         GameObject root = BuildVisual(type, position, Quaternion.Euler(0f, yaw, 0f), out bool usedFallback);
         root.name = "Fortification_" + type + "_" + id;
 
-        // High wire is enlarged uniformly (1.3x). The visual sits in a
-        // wrapper so the gameplay colliders below keep their exact authored
-        // sizes — no invisible barrier above the model.
-        if (type == FortificationType.HighWire)
-        {
-            GameObject wrapper = new GameObject(root.name);
-            wrapper.transform.SetPositionAndRotation(root.transform.position, root.transform.rotation);
-            root.transform.SetParent(wrapper.transform, true);
-            root.transform.localScale *= 1.3f;
-            root = wrapper;
-        }
 
         FortificationStructure structure = root.AddComponent<FortificationStructure>();
         structure.id = id;
@@ -939,11 +1266,18 @@ public class FortificationManager : NetworkBehaviour
         }
 
         // The thrower sees a faint ground ring showing their crate's AOE.
-        if (isLocalPlacer && (type == FortificationType.AmmoCrate || type == FortificationType.MedCrate))
+        if (isLocalPlacer && IsDeployableCrate(type))
         {
-            AddAoeRing(root, crateEffectRadius, type == FortificationType.AmmoCrate
-                ? new Color(0.9f, 0.75f, 0.3f, 0.05f)
-                : new Color(0.35f, 0.9f, 0.45f, 0.05f));
+            Color ringColor;
+
+            switch (type)
+            {
+                case FortificationType.AmmoCrate: ringColor = new Color(0.9f, 0.75f, 0.3f, 0.05f); break;
+                case FortificationType.Toolbox: ringColor = new Color(0.5f, 0.7f, 1f, 0.05f); break;
+                default: ringColor = new Color(0.35f, 0.9f, 0.45f, 0.05f); break;
+            }
+
+            AddAoeRing(root, crateEffectRadius, ringColor);
         }
 
         clientStructures[id] = structure;
@@ -1002,7 +1336,63 @@ public class FortificationManager : NetworkBehaviour
             usedFallback = true;
         }
 
+        // High wire is enlarged uniformly. Done HERE rather than at spawn so
+        // the placement ghost is the same size as what actually gets built.
+        // The visual sits inside a wrapper, leaving gameplay colliders on the
+        // unscaled parent at their authored sizes.
+        if (type == FortificationType.HighWire)
+        {
+            root = WrapVisual(root, wrapper => root.transform.localScale *= 1.3f);
+        }
+
+        // Roofs pivot from a corner instead of their middle, so a roof is
+        // placed by the edge you are lining up against a wall rather than by
+        // an invisible centre point floating in mid-air.
+        if (type == FortificationType.CorrugatedRoof)
+        {
+            root = WrapVisual(root, wrapper =>
+            {
+                Bounds bounds = MeasureBounds(wrapper);
+                Vector3 localMin = wrapper.transform.InverseTransformPoint(bounds.min);
+                wrapper.transform.GetChild(0).localPosition -= localMin;
+            });
+        }
+
         return root;
+    }
+
+    // Re-parents a visual under an empty at the same transform, so it can be
+    // scaled or offset without moving the object's own origin.
+    private static GameObject WrapVisual(GameObject visual, System.Action<GameObject> adjust)
+    {
+        GameObject wrapper = new GameObject(visual.name);
+        wrapper.transform.SetPositionAndRotation(visual.transform.position, visual.transform.rotation);
+        visual.transform.SetParent(wrapper.transform, true);
+
+        adjust(wrapper);
+        return wrapper;
+    }
+
+    // World-space bounds of every renderer under an object.
+    private static Bounds MeasureBounds(GameObject root)
+    {
+        Bounds bounds = new Bounds(root.transform.position, Vector3.zero);
+        bool found = false;
+
+        foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>(true))
+        {
+            if (!found)
+            {
+                bounds = renderer.bounds;
+                found = true;
+            }
+            else
+            {
+                bounds.Encapsulate(renderer.bounds);
+            }
+        }
+
+        return bounds;
     }
 
     // Type-specific colliders, kept disabled until the structure completes.
@@ -1031,10 +1421,55 @@ public class FortificationManager : NetworkBehaviour
                 AddBox(root, new Vector3(0f, 0.9f, 0f), new Vector3(2.4f, 1.8f, 0.35f), false);
                 break;
 
+            // Walkable surfaces: thin solid slabs you stand on. Sized to the
+            // props they represent — adjust here if a prop's footprint
+            // differs from these.
+            case FortificationType.DuckBoards:
+                AddBox(root, new Vector3(0f, 0.06f, 0f), new Vector3(1.6f, 0.12f, 3f), false);
+                // Standing volume just above the planks, so only the team
+                // that laid them moves faster along them.
+                AddDuckBoardSpeedZone(root, new Vector3(0f, 0.9f, 0f), new Vector3(1.7f, 1.8f, 3.1f));
+                break;
+
+            case FortificationType.MakeshiftFloor:
+                AddBox(root, new Vector3(0f, 0.08f, 0f), new Vector3(MakeshiftFloorTileSize, 0.16f, MakeshiftFloorTileSize), false);
+                break;
+
+            // Overhead sheet. Measured from the prop rather than guessed:
+            // a hardcoded box floating above the actual mesh is exactly why
+            // this read as non-solid.
+            case FortificationType.CorrugatedRoof:
+                AddMeasuredBox(root);
+                break;
+
+            // The rungs are solid so you cannot walk through it. The climb
+            // volume is centred and wraps BOTH faces, so it does not matter
+            // which way round the ladder was placed.
+            case FortificationType.Ladder:
+                AddBox(root, new Vector3(0f, 1.5f, 0f), new Vector3(0.9f, 3f, 0.12f), false);
+                AddLadderClimbZone(root, new Vector3(0f, 1.5f, 0f), new Vector3(1.1f, 3.2f, 1.6f));
+                break;
+
             default:
                 AddBox(root, new Vector3(0f, 0.35f, 0f), new Vector3(0.9f, 0.7f, 0.7f), false);
                 break;
         }
+    }
+
+    // Collider that matches whatever the prop actually is, so it stays
+    // correct no matter which prefab is assigned to the type.
+    private static void AddMeasuredBox(GameObject root)
+    {
+        Bounds bounds = MeasureBounds(root);
+
+        if (bounds.size.sqrMagnitude < 0.0001f)
+        {
+            AddBox(root, new Vector3(0f, 0.1f, 0f), new Vector3(3f, 0.2f, 3f), false);
+            return;
+        }
+
+        Vector3 localCenter = root.transform.InverseTransformPoint(bounds.center);
+        AddBox(root, localCenter, bounds.size, false);
     }
 
     private static void AddBox(GameObject root, Vector3 center, Vector3 size, bool isTrigger)
@@ -1044,6 +1479,28 @@ public class FortificationManager : NetworkBehaviour
         box.size = size;
         box.isTrigger = isTrigger;
         box.enabled = false;
+    }
+
+    private static void AddDuckBoardSpeedZone(GameObject root, Vector3 center, Vector3 size)
+    {
+        BoxCollider box = root.AddComponent<BoxCollider>();
+        box.center = center;
+        box.size = size;
+        box.isTrigger = true;
+        box.enabled = false;
+
+        root.AddComponent<DuckBoardSpeedZone>();
+    }
+
+    private static void AddLadderClimbZone(GameObject root, Vector3 center, Vector3 size)
+    {
+        BoxCollider box = root.AddComponent<BoxCollider>();
+        box.center = center;
+        box.size = size;
+        box.isTrigger = true;
+        box.enabled = false;
+
+        root.AddComponent<LadderClimbZone>();
     }
 
     private static void AddSlowTrigger(GameObject root, Vector3 center, Vector3 size)
@@ -1072,8 +1529,22 @@ public class FortificationStructure : MonoBehaviour
     public float maxHealth;
     public bool complete;
 
+    // Live structures, so per-frame queries (suppression cover checks) do not
+    // need a scene-wide search.
+    public static readonly List<FortificationStructure> All = new List<FortificationStructure>();
+
     private readonly List<Renderer> blueprintRenderers = new List<Renderer>();
     private readonly List<Material[]> originalMaterials = new List<Material[]>();
+
+    private void OnEnable()
+    {
+        All.Add(this);
+    }
+
+    private void OnDisable()
+    {
+        All.Remove(this);
+    }
 
     // ---- Terrain adaptation ----
     // A structure remembers how high it sat above the terrain when placed
@@ -1092,6 +1563,14 @@ public class FortificationStructure : MonoBehaviour
 
     public void SetTerrainOffset(float offset)
     {
+        // Floors and roofs hold the height they were placed at; letting them
+        // chase the ground is what dragged snapped floors back down.
+        if (FortificationManager.KeepsPlacedHeight(type))
+        {
+            terrainOffsetSet = false;
+            return;
+        }
+
         terrainOffset = Mathf.Max(0f, offset);
         terrainOffsetSet = true;
 
@@ -1214,7 +1693,7 @@ public class FortificationStructure : MonoBehaviour
 
         // Supply crates never block players — their colliders stay off (the
         // AOE is a server-side distance check, no physics needed).
-        if (type == FortificationType.AmmoCrate || type == FortificationType.MedCrate)
+        if (FortificationManager.IsDeployableCrate(type))
         {
             return;
         }
@@ -1222,6 +1701,53 @@ public class FortificationStructure : MonoBehaviour
         foreach (Collider collider in GetComponents<Collider>())
         {
             collider.enabled = true;
+        }
+    }
+}
+
+// Duck boards are a made road: the team that laid them moves faster along
+// them, the enemy gets nothing. Reads the team off the structure it sits on
+// so it needs no wiring of its own.
+public class DuckBoardSpeedZone : MonoBehaviour
+{
+    public float speedMultiplier = 1.1f;
+
+    private FortificationStructure structure;
+
+    private void Awake()
+    {
+        structure = GetComponent<FortificationStructure>();
+    }
+
+    private void OnTriggerStay(Collider other)
+    {
+        PlayerController controller = other.GetComponentInParent<PlayerController>();
+
+        if (controller == null || !controller.enabled || structure == null)
+        {
+            return;
+        }
+
+        PlayerNetworkSetup setup = other.GetComponentInParent<PlayerNetworkSetup>();
+
+        if (setup != null && setup.AssignedTeam == structure.team)
+        {
+            controller.ApplyEnvironmentSpeedBoost(speedMultiplier);
+        }
+    }
+}
+
+// Lets a player climb a completed ladder. Movement is client-authoritative,
+// so like the wire slow this only nudges the local controller.
+public class LadderClimbZone : MonoBehaviour
+{
+    private void OnTriggerStay(Collider other)
+    {
+        PlayerController controller = other.GetComponentInParent<PlayerController>();
+
+        if (controller != null && controller.enabled)
+        {
+            controller.SetOnLadder();
         }
     }
 }

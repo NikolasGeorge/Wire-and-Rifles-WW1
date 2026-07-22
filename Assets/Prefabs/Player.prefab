@@ -288,9 +288,10 @@ MonoBehaviour:
   _networkObjectCache: {fileID: 516998439431662441}
   playerCamera: {fileID: 8125288734515992192}
   walkSpeed: 5
-  sprintSpeed: 8
+  sprintSpeed: 7
   jumpHeight: 0.7
   gravity: -15
+  airControlMultiplier: 0.75
   crouchHeightMultiplier: 0.7
   crouchSpeedMultiplier: 0.5
   crouchCameraLerpSpeed: 10
@@ -298,6 +299,7 @@ MonoBehaviour:
   mouseSensitivity: 0.1
   minPitch: -90
   maxPitch: 90
+  climbSpeed: 3
 --- !u!114 &8411488464799664361
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -335,6 +337,7 @@ MonoBehaviour:
   normalWeaponLocalRotation: {x: 0, y: 0, z: 0}
   sprintWeaponLocalRotation: {x: 13, y: -30, z: 10}
   weaponPoseMoveSpeed: 10
+  suppressionMultiplier: 1
   isAiming: 0
   canAimDuringSprintLockout: 0
   aimWeaponLocalPosition: {x: 0, y: -0.04, z: 0.5}
@@ -525,10 +528,16 @@ MonoBehaviour:
   useSoldierModelFromDummies: 1
   soldierAnimatorController: {fileID: 9100000, guid: a2c86f71e29d9453f6a7b8c9d0e1f2a3, type: 2}
   soldierAvatar: {fileID: 9000000, guid: 5960adc1c4222ec41a52b6f8746ae867, type: 3}
+  boostEnemyContrast: 1
+  enemyContrastSaturationMultiplier: 1.75
+  enemyContrastSaturationAdd: 0.15
+  enemyContrastValueMultiplier: 1.5
+  enemyContrastValueAdd: 0.1
   flareCooldown: 10
-  flareRange: 80
   spotRadius: 20
   spotDuration: 8
+  flareBurnSeconds: 24
+  flareLaunchSpeed: 25.5
   pendingTeam: 0
   pendingClass: 0
   pendingWeapon: 0
@@ -539,6 +548,14 @@ MonoBehaviour:
   grenadeDamageRadius: 14
   grenadeMaxDamage: 90
   grenadeFlareSpotRadius: 15
+  shovelMeleeRange: 2.2
+  axeMeleeRange: 2.2
+  shovelPlayerDamage: 70
+  axePlayerDamage: 80
+  shovelStructureDamage: 75
+  shovelSwingCooldown: 0.75
+  axeSwingCooldown: 0.9
+  axeStructureBonus: 4
   cameraRoot: {fileID: 8598566901067657293}
   ownerOnlyBehaviours:
   - {fileID: 7955301654817707168}
@@ -574,6 +591,11 @@ MonoBehaviour:
   spawnProtectionDuration: 4
   damageFlashColor: {r: 0.8, g: 0.05, b: 0.05, a: 0.4}
   damageFlashFadeTime: 0.45
+  damageFlashMinimum: 0.5
+  healFlashColor: {r: 1, g: 0.96, b: 0.78, a: 0.32}
+  healFlashFadeTime: 1.2
+  damageDirectionDuration: 1.6
+  damageDirectionColor: {r: 1, g: 0.25, b: 0.2, a: 0.9}
   downedBodyLocalPosition: {x: 0, y: 0.35, z: 0}
   downedBodyLocalEulerAngles: {x: 90, y: 0, z: 0}
   downedCameraHeight: 0.5

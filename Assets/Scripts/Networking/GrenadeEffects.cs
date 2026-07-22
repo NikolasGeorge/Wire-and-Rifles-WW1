@@ -41,6 +41,121 @@ public static class GrenadeArc
     }
 }
 
+// Flare ballistics: fired steeply, then a parachute catches at the top of
+// the arc and it drifts down slowly, lighting the ground the whole way.
+// Deterministic and shared by server and clients, exactly like GrenadeArc.
+public static class FlareArc
+{
+    // Much weaker than the grenade's -20: a light flare cartridge keeps
+    // climbing for a long time before it turns over, which is what gives it
+    // the height and the air time. Lighter still than the first pass, so the
+    // shot out of the barrel reads as flat rather than lobbed.
+    public const float Gravity = -3.5f;
+
+    // Once it starts dropping it never falls faster than this — the whole
+    // point of a flare is the long hang time.
+    public const float DescentSpeed = 0.9f;
+
+    // Advances one step; returns true once it has settled on the ground.
+    public static bool Step(ref Vector3 position, ref Vector3 velocity, float deltaTime)
+    {
+        velocity.y += Gravity * deltaTime;
+
+        // Parachute: caps descent without affecting the climb.
+        if (velocity.y < -DescentSpeed)
+        {
+            velocity.y = -DescentSpeed;
+        }
+
+        // Light air drag. Gentle enough that the flare still carries to
+        // where it was aimed before it settles into a hover.
+        velocity.x = Mathf.Lerp(velocity.x, 0f, deltaTime * 0.35f);
+        velocity.z = Mathf.Lerp(velocity.z, 0f, deltaTime * 0.35f);
+
+        Vector3 nextPosition = position + velocity * deltaTime;
+        Vector3 travel = nextPosition - position;
+        float distance = travel.magnitude;
+
+        if (distance > 0.0001f
+            && Physics.Raycast(position, travel / distance, out RaycastHit hit, distance + 0.1f,
+                Physics.DefaultRaycastLayers, QueryTriggerInteraction.Ignore))
+        {
+            // Burns where it lands rather than stopping dead.
+            position = hit.point + hit.normal * 0.1f;
+            velocity = Vector3.zero;
+            return true;
+        }
+
+        position = nextPosition;
+        return false;
+    }
+}
+
+// Client-side flare: a burning light drifting down the same arc the server
+// is spotting from, so what players see is where enemies are being revealed.
+public class FlareVisual : MonoBehaviour
+{
+    private Vector3 velocity;
+    private float lifeRemaining;
+    private bool resting;
+    private Light flareLight;
+    private float baseIntensity;
+
+    public static void Spawn(Vector3 origin, Vector3 velocity, float burnSeconds)
+    {
+        GameObject visual = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        visual.name = "FlareVisual";
+        visual.transform.position = origin;
+        visual.transform.localScale = Vector3.one * 0.35f;
+        Object.Destroy(visual.GetComponent<Collider>());
+
+        visual.GetComponent<Renderer>().material = new Material(Shader.Find("Sprites/Default"))
+        {
+            color = new Color(1f, 0.55f, 0.2f, 0.95f)
+        };
+
+        Light light = visual.AddComponent<Light>();
+        light.type = LightType.Point;
+        light.color = new Color(1f, 0.5f, 0.2f);
+        light.intensity = 6f;
+        light.range = 45f;
+
+        FlareVisual flare = visual.AddComponent<FlareVisual>();
+        flare.velocity = velocity;
+        flare.lifeRemaining = burnSeconds;
+        flare.flareLight = light;
+        flare.baseIntensity = light.intensity;
+    }
+
+    private void Update()
+    {
+        lifeRemaining -= Time.deltaTime;
+
+        if (lifeRemaining <= 0f)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        if (!resting)
+        {
+            Vector3 position = transform.position;
+            resting = FlareArc.Step(ref position, ref velocity, Time.deltaTime);
+            transform.position = position;
+        }
+
+        // Guttering flicker, plus a fade over the last two seconds so it dies
+        // out instead of vanishing.
+        float flicker = 0.85f + 0.15f * Mathf.PerlinNoise(Time.time * 9f, 0f);
+        float fade = Mathf.Clamp01(lifeRemaining / 2f);
+
+        if (flareLight != null)
+        {
+            flareLight.intensity = baseIntensity * flicker * fade;
+        }
+    }
+}
+
 // Client-side visual grenade: a small dark sphere flying the same arc the
 // server simulates. Destroys itself at fuse time (the explosion FX arrives
 // via its own RPC).
@@ -51,8 +166,10 @@ public class GrenadeVisual : MonoBehaviour
     private bool resting;
     private bool isBox;
 
+    // fuseSeconds below zero means "a full fuse" — cooked grenades pass the
+    // shortened time the server worked out.
     public static void Spawn(Vector3 origin, Vector3 velocity, bool box = false,
-        GrenadeType grenadeType = GrenadeType.Frag)
+        GrenadeType grenadeType = GrenadeType.Frag, float fuseSeconds = -1f)
     {
         GameObject visual = null;
 
@@ -95,6 +212,10 @@ public class GrenadeVisual : MonoBehaviour
         if (box)
         {
             grenade.lifeRemaining = 4f;
+        }
+        else if (fuseSeconds >= 0f)
+        {
+            grenade.lifeRemaining = fuseSeconds;
         }
     }
 

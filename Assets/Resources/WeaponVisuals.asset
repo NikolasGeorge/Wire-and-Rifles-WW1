@@ -11,7 +11,7 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e8ac2dbfb8fbdc29d2e3f4a5b6c7d8e9, type: 3}
   m_Name: WeaponVisuals
-  m_EditorClassIdentifier: 
+  m_EditorClassIdentifier:
   lmg: {fileID: 1768742856745986826, guid: 04d33a3ab7d2b8245a0c7c49473d8396, type: 3}
   pistol: {fileID: 7867254334354444338, guid: 46ece3819d3463248aef26a50b6eae92, type: 3}
   lmgAimPosition: {x: 0, y: -0.17, z: 0.18}

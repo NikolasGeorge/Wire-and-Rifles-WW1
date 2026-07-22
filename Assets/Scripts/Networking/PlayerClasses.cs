@@ -30,6 +30,10 @@ public struct PlayerClassDefinition
     public bool canSpot;
     public float buildDigMultiplier;
 
+    // Passive suppression resistance: all incoming suppression is scaled by
+    // this. Every class sits at 1 (no passive); kept as a per-class hook.
+    public float suppressionMultiplier;
+
     public string weapon;
 
     // Selectable primaries; index 0 is the default. Only Assault has more
@@ -58,6 +62,7 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 1f,
+            suppressionMultiplier = 1f,
             weapon = "Semi-Auto / Bolt-Action / Shotgun",
             weaponOptions = new[] { WeaponId.SemiAutoRifle, WeaponId.BoltAction, WeaponId.Shotgun },
             grenade = "Frag Grenade",
@@ -75,6 +80,7 @@ public static class PlayerClasses
             canRevive = true,
             canSpot = false,
             buildDigMultiplier = 1f,
+            suppressionMultiplier = 1f,
             weapon = "Service Pistol",
             weaponOptions = new[] { WeaponId.Pistol },
             grenade = "Smoke Grenade",
@@ -92,6 +98,7 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 1f,
+            suppressionMultiplier = 1f,
             weapon = "LMG (deployed fire)",
             weaponOptions = new[] { WeaponId.Lmg },
             grenade = "Stick Grenade",
@@ -109,6 +116,7 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = true,
             buildDigMultiplier = 1f,
+            suppressionMultiplier = 1f,
             weapon = "Scoped Bolt-Action (6x)",
             weaponOptions = new[] { WeaponId.ScopedBoltAction },
             grenade = "Flare Grenade",
@@ -126,6 +134,7 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 2f,
+            suppressionMultiplier = 1f,
             weapon = "Bolt-Action Rifle",
             weaponOptions = new[] { WeaponId.BoltAction },
             grenade = "Incendiary Grenade",
@@ -143,6 +152,7 @@ public static class PlayerClasses
             canRevive = false,
             canSpot = false,
             buildDigMultiplier = 1f,
+            suppressionMultiplier = 1f,
             weapon = "Service Pistol",
             weaponOptions = new[] { WeaponId.Pistol },
             grenade = "Smoke Grenade",
