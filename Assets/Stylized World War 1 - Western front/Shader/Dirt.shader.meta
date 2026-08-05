@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: 104ad36d57aa1704184d5f2dce1ed96d
+ShaderImporter:
+  externalObjects: {}
+  defaultTextures: []
+  nonModifiableTextures: []
+  preprocessorOverride: 0
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 227269
+  packageName: Stylized World War 1 - Western front
+  packageVersion: 1.0
+  assetPath: Assets/Stylized World War 1 - Western front/Shader/Dirt.shader
+  uploadId: 592640
