@@ -109,3 +109,11 @@ InitTestScene*.unity*
 # Imported asset-pack archive kept locally, not in the repo
 Assets/Stylized World War 1 - Western front.zip
 Assets/Stylized World War 1 - Western front.zip.meta
+
+# --- .NET test project (Tests/) ---
+# The Unity template ignores *.csproj because Unity regenerates them. The test
+# project's file is hand-written and must be tracked, so it is re-included
+# here. Its build output is not.
+!Tests/**/*.csproj
+Tests/**/[Bb]in/
+Tests/**/[Oo]bj/

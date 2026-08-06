@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tests the game's pure data and rules without Unity.
+
+    Running Unity's own Test Framework in CI needs an activated Unity licence,
+    which means putting personal Unity credentials into a repository secret.
+    The logic worth testing here - class definitions, weapon profiles, and the
+    enum values that go over the wire - has no Unity dependency at all, so it
+    is compiled directly by this project instead. `dotnet test` runs it on any
+    machine with the .NET SDK and nothing else.
+
+    This project lives outside Assets/ so Unity never sees or compiles it.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>WireAndRifles.Tests</AssemblyName>
+    <RootNamespace>WireAndRifles.Tests</RootNamespace>
+    <!-- The game scripts are C# 9-era and not warning-clean under net8 rules;
+         this project tests them, it does not restyle them. -->
+    <NoWarn>$(NoWarn);CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <!-- Linked, not copied. There is exactly one definition of each of these
+       files; the tests read the same source Unity compiles. -->
+  <ItemGroup>
+    <Compile Include="../../Assets/Scripts/Networking/PlayerClasses.cs" Link="Game/PlayerClasses.cs" />
+    <Compile Include="../../Assets/Scripts/Networking/DamageTypes.cs" Link="Game/DamageTypes.cs" />
+    <Compile Include="../../Assets/Scripts/Teams/Teams.cs" Link="Game/Teams.cs" />
+    <Compile Include="../../Assets/Scripts/UI/ObjectiveEventType.cs" Link="Game/ObjectiveEventType.cs" />
+    <Compile Include="../../Assets/Scripts/Weapons/WeaponProfiles.cs" Link="Game/WeaponProfiles.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NUnit" Version="4.2.2" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+</Project>
