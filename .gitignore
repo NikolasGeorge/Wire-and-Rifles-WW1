@@ -117,3 +117,6 @@ Assets/Stylized World War 1 - Western front.zip.meta
 !Tests/**/*.csproj
 Tests/**/[Bb]in/
 Tests/**/[Oo]bj/
+
+# Local AI assistant instructions, not part of the public project
+CLAUDE.md
